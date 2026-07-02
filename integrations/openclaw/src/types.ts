@@ -3,7 +3,6 @@
 // ---------------------------------------------------------------------------
 
 export type CogneeSearchType =
-  | "HYBRID_COMPLETION"
   | "GRAPH_COMPLETION"
   | "GRAPH_COMPLETION_COT"
   | "GRAPH_COMPLETION_CONTEXT_EXTENSION"
@@ -77,13 +76,6 @@ export type CogneePluginConfig = {
   // --- Session ---
   enableSessions?: boolean;
   persistSessionsAfterEnd?: boolean;
-  /**
-   * Capture the conversation into Cognee's session cache: each tool call is
-   * stored as a TraceEntry (after_tool_call) and each prompt/answer pair as a
-   * QAEntry (llm_output), mirroring the claude-code/codex integrations.
-   * Requires enableSessions. Default: true.
-   */
-  captureSession?: boolean;
 
   // --- Search ---
   searchType?: CogneeSearchType;
@@ -109,16 +101,17 @@ export type CogneePluginConfig = {
   // --- Timeouts ---
   requestTimeoutMs?: number;
   ingestionTimeoutMs?: number;
-
-  // --- Recall budget + circuit breaker (claude/codex parity) ---
-  /** Per recall HTTP call timeout on the prompt hot path (no retries). Default: 2500 */
+  /** Timeout for read operations (search / recall). Defaults to requestTimeoutMs. */
   recallTimeoutMs?: number;
-  /** Overall wall-clock budget for the recall step per prompt. Default: 4000 */
-  recallBudgetMs?: number;
-  /** Consecutive breaker-eligible failures (network/timeout/5xx) before the breaker opens. Default: 5 */
-  recallBreakerThreshold?: number;
-  /** How long recall is skipped after the breaker opens. Default: 120000 */
-  recallBreakerCooldownMs?: number;
+
+  // --- Circuit breaker ---
+  /** Trip the breaker after repeated backend failures so a down server isn't
+   *  hammered on every call. Default: true. */
+  breakerEnabled?: boolean;
+  /** Consecutive UNREACHABLE / 5xx failures before the breaker opens. Default: 5. */
+  breakerThreshold?: number;
+  /** How long the breaker stays open before allowing a retry, in ms. Default: 120000. */
+  breakerCooldownMs?: number;
 };
 
 export type CogneeAddResponse = {

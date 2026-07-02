@@ -387,6 +387,17 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 |--------|------|---------|-------------|
 | `requestTimeoutMs` | number | `60000` | HTTP timeout for Cognee requests |
 | `ingestionTimeoutMs` | number | `300000` | HTTP timeout for add/update requests |
+| `recallTimeoutMs` | number | `requestTimeoutMs` | HTTP timeout for read requests (search/recall) |
+
+### Circuit breaker
+
+Repeated backend failures trip an in-memory circuit breaker so a down Cognee server isn't hammered on every call. Only genuine backend trouble counts: unreachable responses (connection failure / timeout) and 5xx. Auth failures (401/403) are surfaced but never trip the breaker, since waiting wouldn't fix a config problem. While open, calls fail fast until the cooldown elapses.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `breakerEnabled` | boolean | `true` | Enable the circuit breaker |
+| `breakerThreshold` | number | `5` | Consecutive unreachable/5xx failures before the breaker opens |
+| `breakerCooldownMs` | number | `120000` | How long the breaker stays open before allowing a retry |
 
 ### Recall budget & circuit breaker
 
