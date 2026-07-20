@@ -142,7 +142,10 @@ export class CogneeHttpClient {
           const errorText = await response.text();
           throw new Error(`Cognee request failed (${response.status}): ${errorText}`);
         }
-        return (await response.json()) as T;
+        // Honor responseParser on the success path — parity with the retry path
+        // and the openclaw client. No opencode caller passes a custom parser
+        // today, but the shared transport must not silently force JSON. (gh #195)
+        return responseParser(response);
       } catch (error) {
         clearTimeout(timer);
         const isTimeout =

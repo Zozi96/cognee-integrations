@@ -169,7 +169,11 @@ export class CogneeHttpClient {
           const errorText = await response.text();
           throw new Error(`Cognee request failed (${response.status}): ${errorText}`);
         }
-        return (await response.json()) as T;
+        // Honor responseParser on the success path too — parity with the
+        // 401-retry path above, which already returns responseParser(...).
+        // visualise() passes a text parser to read the graph HTML the server
+        // returns; forcing response.json() here threw on every 200. (gh #195)
+        return responseParser(response);
       } catch (error) {
         clearTimeout(timer);
         const isTimeout =
