@@ -8,9 +8,9 @@
       "name": "cognee",
       "source": {
         "source": "git-subdir",
-        "url": "https://github.com/topoteretes/cognee-integrations.git",
+        "url": "https://github.com/Zozi96/cognee-integrations.git",
         "path": "./integrations/codex/plugins/cognee",
-        "ref": "main"
+        "ref": "codex-local-fixes"
       },
       "policy": {
         "installation": "AVAILABLE",
