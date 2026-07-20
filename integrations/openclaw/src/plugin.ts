@@ -67,7 +67,7 @@ const memoryCogneePlugin = {
       );
     }
 
-    const client = new CogneeHttpClient(cfg.baseUrl, cfg.apiKey, cfg.username, cfg.password, cfg.requestTimeoutMs, cfg.ingestionTimeoutMs, cfg.mode, cfg.recallTimeoutMs, cfg.breakerEnabled, cfg.breakerThreshold, cfg.breakerCooldownMs);
+    const client = new CogneeHttpClient(cfg.baseUrl, cfg.apiKey, cfg.username, cfg.password, cfg.requestTimeoutMs, cfg.ingestionTimeoutMs, cfg.mode);
     const multiScope = isMultiScopeEnabled(cfg);
 
     (api as MemoryFlushPlanRegistrant).registerMemoryFlushPlan?.(buildMemoryFlushPlan);

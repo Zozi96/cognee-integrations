@@ -17,21 +17,6 @@ const MAX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 3_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_INGESTION_TIMEOUT_MS = 300_000;
-// Circuit breaker defaults mirror the Python clients (Hermes provider,
-// claude-code recall client): open after 5 consecutive UNREACHABLE / 5xx
-// failures, stay open for 120s.
-const DEFAULT_BREAKER_THRESHOLD = 5;
-const DEFAULT_BREAKER_COOLDOWN_MS = 120_000;
-
-// Thrown for reachable HTTP error responses. Carries the status so the circuit
-// breaker can tell a server-side 5xx (trip-worthy) from a reachable 4xx like
-// 401/403 (a config problem that must NOT trip the breaker).
-class CogneeHttpError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
-    this.name = "CogneeHttpError";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // CogneeHttpClient — shared HTTP transport with auth, retry, timeout
@@ -44,28 +29,31 @@ export class CogneeHttpClient {
   private authToken: string | undefined;
   private loginPromise: Promise<void> | undefined;
 
-  // Circuit breaker state, kept in-memory: this client is long-lived (mirroring
-  // the Hermes provider), unlike the file-based short-lived plugin hooks.
-  private consecutiveFailures = 0;
-  private breakerOpenUntil = 0;
-
   constructor(
     readonly baseUrl: string,
-    private readonly apiKey?: string,
+    private apiKey?: string,
     private readonly username?: string,
     private readonly password?: string,
     private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
     readonly ingestionTimeoutMs: number = DEFAULT_INGESTION_TIMEOUT_MS,
     readonly mode: CogneeMode = "local",
-    // Read ops share the request timeout unless a tighter recall bound is given.
-    private readonly recallTimeoutMs: number = timeoutMs,
-    private readonly breakerEnabled: boolean = true,
-    private readonly breakerThreshold: number = DEFAULT_BREAKER_THRESHOLD,
-    private readonly breakerCooldownMs: number = DEFAULT_BREAKER_COOLDOWN_MS,
   ) { }
 
   private get isCloud(): boolean {
     return this.mode === "cloud";
+  }
+
+  /**
+   * Inject an API key resolved/minted after construction (resolveOrMintApiKey).
+   * From then on every request authenticates with X-Api-Key and the JWT login
+   * fallback is never used again — the key is the principal identity, matching
+   * the claude-code/codex integrations. JWT login remains only as the one-time
+   * bootstrap that mints a key on a fresh LOCAL server (cloud has no login
+   * route, which is why COGNEE_API_KEY is mandatory there).
+   */
+  setApiKey(key: string): void {
+    const trimmed = (key ?? "").trim();
+    if (trimmed) this.apiKey = trimmed;
   }
 
   async login(): Promise<void> {
@@ -115,10 +103,11 @@ export class CogneeHttpClient {
       return { "X-Api-Key": this.apiKey! };
     }
     if (this.apiKey) {
-      return {
-        Authorization: `Bearer ${this.apiKey}`,
-        "X-Api-Key": this.apiKey,
-      };
+      // X-Api-Key ONLY — an API key is not a JWT, and servers that validate
+      // Authorization as a JWT (e.g. cloud pods) can reject the request on a
+      // bogus Bearer before the API key is even considered. Parity with the
+      // claude-code/codex integrations, which send only X-Api-Key.
+      return { "X-Api-Key": this.apiKey };
     }
     if (this.authToken) {
       return { Authorization: `Bearer ${this.authToken}` };
@@ -133,41 +122,8 @@ export class CogneeHttpClient {
     responseParser: (r: Response) => Promise<T> = async (r: Response) => (await r.json()) as T,
     retries = MAX_RETRIES,
   ): Promise<T> {
-    // Short-circuit while the breaker is open so a down backend isn't hammered.
-    if (this.isBreakerOpen()) {
-      throw new CogneeHttpError(
-        503,
-        `Cognee request failed (503): circuit open, retry in ~${this.breakerRetrySecs()}s`,
-      );
-    }
-
-    // Auth is resolved outside the classified block: a login failure is a
-    // config problem, not a down backend, so it must not count toward the breaker.
     await this.ensureAuth();
 
-    try {
-      const result = await this.fetchWithRetry<T>(path, init, timeoutMs, responseParser, retries);
-      this.recordSuccess();
-      return result;
-    } catch (error) {
-      // UNREACHABLE (connection failure / timeout) and 5xx trip the breaker;
-      // a reachable 4xx (e.g. 401/403 auth) is surfaced but does not.
-      if (this.isTripworthy(error)) {
-        this.recordFailure();
-      } else {
-        this.recordSuccess();
-      }
-      throw error;
-    }
-  }
-
-  private async fetchWithRetry<T>(
-    path: string,
-    init: RequestInit,
-    timeoutMs: number,
-    responseParser: (r: Response) => Promise<T>,
-    retries: number,
-  ): Promise<T> {
     let lastError: unknown;
     for (let attempt = 0; attempt <= retries; attempt++) {
       if (attempt > 0) {
@@ -201,7 +157,7 @@ export class CogneeHttpClient {
             });
             if (!retryResponse.ok) {
               const errorText = await retryResponse.text();
-              throw new CogneeHttpError(retryResponse.status, `Cognee request failed (${retryResponse.status}): ${errorText}`);
+              throw new Error(`Cognee request failed (${retryResponse.status}): ${errorText}`);
             }
             return responseParser(retryResponse);
           } finally {
@@ -211,11 +167,9 @@ export class CogneeHttpClient {
 
         if (!response.ok) {
           const errorText = await response.text();
-          throw new CogneeHttpError(response.status, `Cognee request failed (${response.status}): ${errorText}`);
+          throw new Error(`Cognee request failed (${response.status}): ${errorText}`);
         }
-        const data = (await response.json()) as T;
-        clearTimeout(timer);
-        return data;
+        return (await response.json()) as T;
       } catch (error) {
         clearTimeout(timer);
         const isTimeout =
@@ -229,46 +183,6 @@ export class CogneeHttpClient {
       }
     }
     throw lastError;
-  }
-
-  // -- Circuit breaker ------------------------------------------------------
-  // In-memory, consecutive-failure breaker ported from the Python clients.
-  // Only genuine backend trouble trips it: UNREACHABLE (connection failure /
-  // timeout) or a 5xx. A reachable 4xx (401/403) is surfaced but never trips —
-  // waiting wouldn't fix an auth/config problem.
-
-  private isBreakerOpen(): boolean {
-    if (!this.breakerEnabled) return false;
-    if (this.consecutiveFailures < this.breakerThreshold) return false;
-    // Cooldown elapsed → half-open: reset the counter and allow one probe.
-    if (Date.now() >= this.breakerOpenUntil) {
-      this.consecutiveFailures = 0;
-      return false;
-    }
-    return true;
-  }
-
-  private breakerRetrySecs(): number {
-    return Math.max(0, Math.ceil((this.breakerOpenUntil - Date.now()) / 1000));
-  }
-
-  private recordSuccess(): void {
-    this.consecutiveFailures = 0;
-  }
-
-  private recordFailure(): void {
-    this.consecutiveFailures += 1;
-    if (this.consecutiveFailures >= this.breakerThreshold) {
-      this.breakerOpenUntil = Date.now() + this.breakerCooldownMs;
-    }
-  }
-
-  private isTripworthy(error: unknown): boolean {
-    // Reachable HTTP responses carry a status: only 5xx trips.
-    if (error instanceof CogneeHttpError) return error.status >= 500;
-    // Anything else here is a transport failure (connection refused, DNS, or a
-    // timeout/abort after retries) — i.e. UNREACHABLE — which trips.
-    return true;
   }
 
   // -- Health ---------------------------------------------------------------
@@ -602,13 +516,18 @@ export class CogneeHttpClient {
         ...(params.searchPrompt ? { systemPrompt: params.searchPrompt } : {}),
         ...(params.sessionId ? { session_id: params.sessionId } : {}),
       }),
-    }, this.recallTimeoutMs);
+    });
     return normalizeSearchResults(data);
   }
 
   // POST /api/v1/recall — Cognee 1.0.3's memory-oriented alias for /search.
   // Mirrors the search payload but adds session_id + scope, so results can
   // mix session-cache hits with graph hits when sessions are enabled.
+  //
+  // only_context defaults to true (same as the claude-code/codex plugins):
+  // the server returns the retrieved context and SKIPS the LLM completion
+  // step, which dominates recall latency in the *_COMPLETION search types.
+  // Injected memories should be stored context, not generated answers.
   async recall(params: {
     queryText: string;
     searchPrompt: string;
@@ -617,22 +536,117 @@ export class CogneeHttpClient {
     topK?: number;
     sessionId?: string;
     scope?: string | string[];
+    onlyContext?: boolean;
+    /** Per-call timeout for the prompt hot path. When set, retries are
+     *  disabled so a slow server fails fast instead of eating the budget. */
+    timeoutMs?: number;
   }): Promise<CogneeSearchResult[]> {
     const recallPath = this.isCloud ? "/recall" : "/api/v1/recall";
-    const data = await this.fetchAPI<unknown>(recallPath, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: params.queryText,
-        search_type: params.searchType,
-        dataset_ids: params.datasetIds,
-        ...(typeof params.topK === "number" ? { top_k: params.topK } : {}),
-        ...(params.searchPrompt ? { system_prompt: params.searchPrompt } : {}),
-        ...(params.sessionId ? { session_id: params.sessionId } : {}),
-        ...(params.scope ? { scope: params.scope } : {}),
-      }),
-    }, this.recallTimeoutMs);
+    const data = await this.fetchAPI<unknown>(
+      recallPath,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: params.queryText,
+          search_type: params.searchType,
+          dataset_ids: params.datasetIds,
+          only_context: params.onlyContext ?? true,
+          ...(typeof params.topK === "number" ? { top_k: params.topK } : {}),
+          ...(params.searchPrompt ? { system_prompt: params.searchPrompt } : {}),
+          ...(params.sessionId ? { session_id: params.sessionId } : {}),
+          ...(params.scope ? { scope: params.scope } : {}),
+        }),
+      },
+      params.timeoutMs ?? this.timeoutMs,
+      undefined,
+      params.timeoutMs ? 0 : undefined,
+    );
     return normalizeSearchResults(data);
+  }
+
+  // POST /api/v1/remember/entry — store a typed QA/trace entry in the server's
+  // session cache. Same contract as the claude-code/codex plugins'
+  // remember_entry_via_http: body is { entry, dataset_name, session_id }.
+  async rememberEntry(params: {
+    datasetName: string;
+    sessionId: string;
+    entry: Record<string, unknown>;
+  }): Promise<{ entryId?: string }> {
+    const result = await this.fetchAPI<Record<string, unknown>>(
+      "/api/v1/remember/entry",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entry: params.entry,
+          dataset_name: params.datasetName,
+          session_id: params.sessionId,
+        }),
+      },
+      30_000,
+    );
+    return { entryId: typeof result.entry_id === "string" ? result.entry_id : undefined };
+  }
+
+  async registerAgent(params: {
+    agentSessionName: string;
+    sessionId?: string;
+    datasetNames?: string[];
+  }): Promise<{ ok: boolean; connectionId?: string }> {
+    const body: Record<string, unknown> = {
+      agent_session_name: params.agentSessionName,
+      type: "api",
+      memory_mode: "hybrid",
+      source: "api",
+    };
+    if (params.sessionId) body.session_id = params.sessionId;
+    if (params.datasetNames && params.datasetNames.length > 0) {
+      body.dataset_names = params.datasetNames.filter((n) => n.trim());
+    }
+    const result = await this.fetchAPI<Record<string, unknown>>(
+      "/api/v1/agents/register",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    );
+    return { ok: true, connectionId: typeof result.id === "string" ? result.id : undefined };
+  }
+
+  async unregisterAgent(params: {
+    agentSessionName: string;
+  }): Promise<{ ok: boolean; activeAgents: number }> {
+    try {
+      const result = await this.fetchAPI<Record<string, unknown>>(
+        "/api/v1/agents/unregister",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_session_name: params.agentSessionName }),
+        },
+      );
+      const raw = Number(result.activeAgents ?? result.active_agents ?? 0);
+      const activeAgents = Number.isFinite(raw) ? raw : 0;
+      return { ok: true, activeAgents };
+    } catch (error) {
+      return { ok: false, activeAgents: 0 };
+    }
+  }
+
+  async listApiKeys(): Promise<{ key: string; name?: string }[]> {
+    return this.fetchAPI<{ key: string; name?: string }[]>(
+      "/api/v1/auth/api-keys",
+      { method: "GET" },
+    );
+  }
+
+  async createApiKey(name: string): Promise<{ key: string }> {
+    return this.fetchAPI<{ key: string }>(
+      "/api/v1/auth/api-keys",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      },
+    );
   }
 
   async listDatasets(): Promise<{ id: string; name: string }[]> {
