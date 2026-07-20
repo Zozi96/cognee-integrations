@@ -169,7 +169,9 @@ export class CogneeHttpClient {
           const errorText = await response.text();
           throw new Error(`Cognee request failed (${response.status}): ${errorText}`);
         }
-        return (await response.json()) as T;
+        const data = (await response.json()) as T;
+        clearTimeout(timer);
+        return data;
       } catch (error) {
         clearTimeout(timer);
         const isTimeout =
