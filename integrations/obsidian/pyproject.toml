@@ -9,6 +9,12 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.14.6",
+]
+
 [project.scripts]
 cognee-obsidian-export = "cognee_integration_obsidian.traversal:cli"
 
