@@ -119,14 +119,53 @@ jobs:
 
       # A live failure is only actionable with the plugin's own logs, and the
       # temp HOMEs are gone by the time anyone looks at the run.
+      #
+      # The server side matters as much as the hooks': the recall endpoint turns
+      # any unexpected exception into a bare "409 Conflict", so the hook log only
+      # ever shows the status and the real traceback lives with the server the
+      # plugin booted. That server writes to two places under the temp HOME it
+      # was started from: its stdout/stderr pump (server-console.log in the
+      # plugin state dir) and cognee's own file log (COGNEE_LOGS_DIR, default
+      # ~/.cognee/logs, falling back to /tmp/cognee_logs). Tail both, then pull
+      # every recall traceback in full so it survives even when the tail is
+      # dominated by later request noise.
       - name: Collect plugin logs on failure
         if: failure()
         run: |
-          echo "### hook logs from temp HOMEs" >> "$GITHUB_STEP_SUMMARY"
-          find /tmp /var/folders -name 'hook.log' -path '*cognee-plugin*' 2>/dev/null | while read -r f; do
-            echo "--- $f" >> "$GITHUB_STEP_SUMMARY"
-            tail -80 "$f" >> "$GITHUB_STEP_SUMMARY"
-          done
+          {
+            echo "### hook logs from temp HOMEs"
+            find /tmp /var/folders -name 'hook.log' -path '*cognee-plugin*' 2>/dev/null | while read -r f; do
+              echo "--- $f"
+              tail -80 "$f"
+            done
+
+            echo
+            echo "### server console (stdout/stderr of the booted server)"
+            find /tmp /var/folders -name 'server-console.log*' -path '*cognee-plugin*' 2>/dev/null | while read -r f; do
+              echo "--- $f"
+              tail -200 "$f"
+            done
+            find /tmp /var/folders -name 'server-console.log*' -path '*cognee-plugin*' 2>/dev/null | grep -q . || \
+              echo "(no server console log — the boot never got that far)"
+
+            echo
+            echo "### cognee server file log (newest per HOME)"
+            logs="$( { find /tmp /var/folders -path '*/.cognee/logs/*.log' 2>/dev/null; ls /tmp/cognee_logs/*.log 2>/dev/null; } | xargs -r ls -t 2>/dev/null)"
+            if [ -n "$logs" ]; then
+              echo "$logs" | head -3 | while read -r f; do
+                echo "--- $f"
+                tail -200 "$f"
+              done
+            else
+              echo "(no cognee file log found)"
+            fi
+
+            echo
+            echo "### recall endpoint tracebacks (every occurrence, with context)"
+            { find /tmp /var/folders \( -name 'server-console.log*' -o -path '*/.cognee/logs/*.log' \) 2>/dev/null; ls /tmp/cognee_logs/*.log 2>/dev/null; } \
+              | xargs -r grep -n -A 60 'Recall endpoint error' 2>/dev/null \
+              || echo "(no 'Recall endpoint error' in any server log)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   cloud:
     name: live tier (cloud tenant)

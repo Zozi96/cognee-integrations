@@ -107,7 +107,12 @@ BUFFERED_SAVE_KINDS = ("trace_buffered", "answer_buffered")
 ALL_SAVE_KINDS = SAVE_KINDS + BUFFERED_SAVE_KINDS
 
 # Cap the per-line log size so a noisy tool output doesn't bloat the file.
-_LOG_LINE_CAP = 600
+# The cut is a plain slice plus "...", so a line over the cap is no longer
+# valid JSON and every reader that parses hook.log drops it. Keep the cap
+# above the largest structured line the hooks emit: the recall summary
+# (context_lookup_hit, with per_scope timings and the buffered save counts)
+# runs ~640 chars.
+_LOG_LINE_CAP = 700
 
 # Default auto-improve threshold (tool calls + stops). Env override.
 AUTO_IMPROVE_EVERY_DEFAULT = 150
