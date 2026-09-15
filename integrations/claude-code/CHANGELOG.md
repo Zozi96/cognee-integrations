@@ -10,6 +10,40 @@ Code only offers an update when that string changes. Tag releases as
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.6]
+
+### Added
+- **Search another dataset without switching.** Recall reads only the active dataset,
+  so information living in another dataset was invisible unless the user switched —
+  a full switch (sync, new Cognee session, repointed launch record) just to look
+  something up. Now, on every prompt the server answers, the recall hook appends an
+  `Other Cognee datasets you can search` block to the injected context: every other
+  dataset the identity can read (read-only ones included), with UUIDs, plus the
+  command to search one. It rides along on hits too: graph retrieval is
+  nearest-neighbour and returns something from any populated dataset, so "zero
+  hits" never happens and only the model can tell whether the recalled context
+  answers the user. If the user is recalling something the active dataset did not
+  have, Claude offers those datasets with a picker; the chosen one gets a one-off
+  **graph-only** search and the answer names its source dataset. The active dataset,
+  session and write target are untouched. The same flow is spelled out in the
+  `cognee-search` skill and the `cognee-recall` agent (which no longer claims to span all datasets) for when an explicit search comes back empty.
+  - `scripts/list-datasets.py [--others]` lists every readable dataset (JSON) with
+    the active one marked (`switch-dataset.py --list` still shows only switch
+    targets). `list_readable_datasets` is the shared listing both build on.
+  - `cognee-search.sh --dataset-id <uuid>` addresses a dataset by UUID (a name only
+    resolves among owned datasets). Any dataset other than the active one is forced
+    to graph scope with the session id dropped — session history is bound to the
+    active dataset — with a note on stderr; the active dataset named by hand keeps
+    the full scope.
+  - The hint's listing comes from a per-plugin cache
+    (`~/.cognee-plugin/claude-code/readable-datasets.json`, keyed by server and identity)
+    refreshed at most every `COGNEE_DATASETS_CACHE_TTL` seconds (default 300) and
+    only inside what remains of the recall budget, so the prompt path never waits on
+    it. `COGNEE_RECALL_DATASET_HINT=off` disables the hint. Every other readable
+    dataset is named — nothing ranks them, so the user chooses.
+  - New hook events: `recall.dataset_hint`, `datasets.readable_refresh_failed`,
+    `datasets.list_failed`.
+
 ## [1.5.5]
 
 ### Fixed

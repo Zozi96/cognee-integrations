@@ -194,6 +194,17 @@ def drive_recall(
     }
     for name, impl in seams.items():
         monkeypatch.setattr(module, name, impl)
+    # The cross-dataset hint's listing (claude-code / codex): stubbed to "no
+    # other datasets" so no hook test reaches the readable-datasets cache or
+    # the network. Left alone when the test already replaced it (the hook
+    # binds the common module's function by name, so an untouched seam is
+    # still that very object) — test_cross_dataset_search.py stubs its own.
+    common = sys.modules.get("_plugin_common")
+    original = getattr(common, "cached_readable_datasets", None)
+    if hasattr(module, "cached_readable_datasets") and (
+        original is None or module.cached_readable_datasets is original
+    ):
+        monkeypatch.setattr(module, "cached_readable_datasets", lambda **kw: [])
 
     if local_sdk:
         _install_local_sdk(module, monkeypatch, run, sdk_recall)

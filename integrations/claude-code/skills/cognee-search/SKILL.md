@@ -102,6 +102,45 @@ cognee-cli recall "$ARGUMENTS" -k 5 -f json
 If the CLI is missing, say the server is unreachable and show the user
 `${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh` output instead.
 
+## Not found in the active dataset? Offer another one
+
+Search is scoped to this session's **active** dataset. When the server answers
+with an authoritative empty list (or the `UserPromptSubmit` header injected an
+"Other Cognee datasets you can search" block), the information may simply live
+in another dataset the user can read. Do **not** switch datasets for that — a
+switch retires the session. Offer a one-off search instead:
+
+1. List the candidates (every dataset this identity can read, the active one
+   excluded; read-only datasets are searchable and included):
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py --others
+   ```
+
+   The JSON has `current` (`{name, id, ids}`) and `datasets`
+   (`[{name, id, owner_id, current}]`). The hook's hint block already names all
+   of them with their ids, so when it is present you can skip this call.
+
+2. Ask the user which dataset to search with **AskUserQuestion** (single
+   select, dataset names as options; more than four → first three plus a
+   "More…" option and page on the next question). Include a "None, stop here"
+   reading in the question text. Only ask when the user is actually trying to
+   recall something — an ordinary prompt with no memory match needs no picker.
+
+3. Run the graph-only search on the chosen dataset **by UUID** (a name only
+   resolves among datasets this identity owns), then answer from it and say
+   which dataset the results came from:
+
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS" 10 --graph --dataset-id <id>
+   ```
+
+   The wrapper forces graph scope and drops the session id for any dataset
+   other than the active one (session history is bound to the active dataset),
+   noting so on stderr. The active dataset, the Cognee session and where
+   writes go are untouched. If the user then wants that dataset for the rest
+   of the session, point them to `/cognee-memory:cognee-switch-datasets`.
+
 ## Understanding results
 
 Results include a `_source` field:
@@ -120,4 +159,5 @@ Session entries tagged with `[category:agent]` are automatic tool call logs.
 | "what does the codebase do" / "what did we do last time" | `cognee-search.sh "<query>" 10 --graph` |
 | Need a specific category | use the `node_name` curl form above (`["user_context"\|"project_docs"\|"agent_actions"]`) |
 | Auto context insufficient | `cognee-search.sh "<query>" 10 --session` |
+| **Server says empty and the user is recalling something** | **Offer the other readable datasets (`list-datasets.py --others` + AskUserQuestion), then `cognee-search.sh "<query>" 10 --graph --dataset-id <id>`** |
 | **Result empty but you expect content** | **Ground-truth via the credential-resolving `curl` above before concluding "not found"** |

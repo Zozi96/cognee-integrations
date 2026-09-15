@@ -129,6 +129,7 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:json_load_failed` | `json.load_failed` |
 | `hook:json_write_failed` | `json.write_failed` |
 | `hook:last_recall_write_failed` | `last.recall_write_failed` |
+| `hook:list_datasets_failed` | `datasets.list_failed` |
 | `hook:launch_dataset_ids_skipped` | `launch.dataset_ids_skipped` |
 | `hook:legacy_config_json_removed` | `legacy.config_json_removed` |
 | `hook:legacy_config_json_unlink_failed` | `legacy.config_json_unlink_failed` |
@@ -171,9 +172,11 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:recall_auth_rejected` | `recall.auth_rejected` |
 | `hook:recall_breaker_open` | `recall.breaker_open` |
 | `hook:recall_budget_exceeded` | `recall.budget_exceeded` |
+| `hook:recall_dataset_hint` | `recall.dataset_hint` |
 | `hook:recall_error` | `recall.error` |
 | `hook:recall_graph_not_built` | `recall.graph_not_built` |
 | `hook:recall_health_accounting_failed` | `recall.health_accounting_failed` |
+| `hook:readable_datasets_refresh_failed` | `datasets.readable_refresh_failed` |
 | `hook:recall_server_down` | `recall.server_down` |
 | `hook:recall_skipped_not_ready` | `recall.skipped_not_ready` |
 | `hook:run_exception` | `run.exception` |

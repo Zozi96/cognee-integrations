@@ -19,6 +19,7 @@ import importlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -244,3 +245,28 @@ def _isolate_process_env(home: Path | str, monkeypatch) -> None:
     monkeypatch.setenv("USERPROFILE", str(home))
     for key, value in DETERMINISTIC_ENV.items():
         monkeypatch.setenv(key, value)
+
+
+def usable_bash() -> str | None:
+    """Path to a bash that actually runs scripts, or None.
+
+    ``shutil.which("bash")`` alone is not enough: on Windows it resolves to
+    ``C:\\Windows\\System32\\bash.exe`` — the WSL launcher — which, with no distro
+    installed, prints "Windows Subsystem for Linux has no installed
+    distributions" (as UTF-16) and exits 1. The shell wrappers are POSIX
+    scripts that also need ``python3`` and ``curl`` on the shell's PATH, so they
+    are not exercised on Windows at all; elsewhere the probe guards against any
+    stub. Shared by every e2e test that runs a ``.sh`` wrapper as a subprocess.
+    """
+    if sys.platform == "win32":
+        return None
+    bash = shutil.which("bash")
+    if not bash:
+        return None
+    try:
+        probe = subprocess.run(
+            [bash, "-c", "echo __ok__"], capture_output=True, encoding="utf-8", timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bash if probe.returncode == 0 and "__ok__" in probe.stdout else None

@@ -516,22 +516,28 @@ def dataset_id_for(dataset: str, host_key: str = "") -> str:
     return ""
 
 
-def shell_runtime_overrides(service_url: str = "") -> dict:
-    """Launch-record state for the shell skills (cognee-search.sh / cognee-remember.sh).
+def shell_runtime_overrides(service_url: str = "", host_key: str = "") -> dict:
+    """Launch-record state for the shell skills (cognee-search.sh / cognee-remember.sh)
+    and ``list-datasets.py``.
 
     Those run under the host's shell tool with no hook payload, so they find
-    their launch record via ``resolve_host_key_outside_hook``. Returns the
-    record's ``session_id`` / ``dataset`` (both empty when unrecorded), the
-    dataset's canonical ``dataset_id`` and comma-joined ``dataset_ids``, and
-    ``api_key`` — the provisioned plugin-agent key when one is cached, so the
-    skills act as the same identity as the hooks (see ``_api_key_with_source``).
-    Kept to one call on purpose: the skills embed Python in a ``$( <<'PY' )``
-    block that macOS's bash 3.2 mis-parses once it grows past a few lines.
+    their launch record via ``resolve_host_key_outside_hook`` — or use the
+    ``host_key`` handed in (``--session-key``) when several launches share a
+    directory. Returns that ``host_key``, the record's ``session_id`` /
+    ``dataset`` (both empty when unrecorded), the dataset's canonical
+    ``dataset_id`` and comma-joined ``dataset_ids``, and ``api_key`` — the
+    provisioned plugin-agent key when one is cached, so the skills act as the
+    same identity as the hooks (see ``_api_key_with_source``). Kept to one call
+    on purpose: the skills embed Python in a ``$( <<'PY' )`` block that macOS's
+    bash 3.2 mis-parses once it grows past a few lines.
     """
-    host_key, _ = resolve_host_key_outside_hook()
+    host_key = _sanitize_session_key(host_key)
+    if not host_key:
+        host_key, _ = resolve_host_key_outside_hook()
     rec = _read_map_record(host_key) if host_key else {}
     write_id, read_ids = resolve_active_dataset_ids(host_key) if host_key else ("", [])
     return {
+        "host_key": host_key,
         "session_id": str(rec.get("session_id") or "").strip(),
         "dataset": str(rec.get("dataset") or "").strip(),
         "dataset_id": write_id,
@@ -788,6 +794,31 @@ def _candidate_host_pids() -> set[int]:
     return pids
 
 
+def list_readable_datasets(*, timeout: float = 15.0) -> list[dict]:
+    """Every dataset this key can READ: ``[{"name", "id", "owner_id"}]``, by name.
+
+    ``GET /api/v1/datasets/`` already answers with the caller's read set —
+    owned, granted directly, or shared through a role — so no permission is
+    checked here. This is the cross-dataset search picker's list (a read-only
+    dataset is searchable); ``list_writable_datasets`` narrows it to switch
+    targets by judging write access on top.
+    """
+    raw = _json_http_request("/api/v1/datasets/", method="GET", timeout=timeout)
+    rows = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "name": str(item.get("name") or ""),
+                "id": str(item.get("id") or ""),
+                "owner_id": str(item.get("owner_id") or item.get("ownerId") or ""),
+            }
+        )
+    rows.sort(key=lambda row: (row["name"].lower(), row["id"]))
+    return rows
+
+
 def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
     """Use effective permissions. Ownership cannot prove absence of write access.
 
@@ -803,8 +834,7 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
          "readonly": [names], "readonly_ids": [ids], "hidden_readonly": N,
          "filtered": bool}
     """
-    raw = _json_http_request("/api/v1/datasets/", method="GET", timeout=timeout)
-    items = raw if isinstance(raw, list) else []
+    items = list_readable_datasets(timeout=timeout)
     if not user_id:
         me = _json_http_request("/api/v1/users/me", method="GET", timeout=timeout)
         user_id = str(me.get("id") or "") if isinstance(me, dict) else ""
@@ -830,8 +860,8 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
         role_granted = shared.get("granted") if isinstance(shared.get("granted"), dict) else {}
     rows = []
     for item in items:
-        owner = str(item.get("owner_id") or item.get("ownerId") or "")
-        ident = str(item.get("id") or "")
+        owner = item["owner_id"]
+        ident = item["id"]
         # Writable through the shared role only once the grant is confirmed —
         # a transient failure leaves a parent-owned dataset ungranted until the
         # next refresh, and it must not be offered as writable meanwhile.
@@ -842,15 +872,7 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
             writable = ident in writable_ids or via_role
         else:
             writable = True if owner and (owner == user_id or via_role) else None
-        rows.append(
-            {
-                "name": str(item.get("name") or ""),
-                "id": ident,
-                "owner_id": owner,
-                "writable": writable,
-            }
-        )
-    rows.sort(key=lambda row: (row["name"].lower(), row["id"]))
+        rows.append({**item, "writable": writable})
     return {
         "datasets": [row for row in rows if row["writable"] is not False],
         "readonly": [row["name"] for row in rows if row["writable"] is False],
@@ -858,6 +880,102 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
         "hidden_readonly": sum(row["writable"] is False for row in rows),
         "filtered": writable_ids is not None,
     }
+
+
+# ── readable-datasets cache (cross-dataset search hint) ─────────────────────
+# The prompt hook offers the other readable datasets when the active one's
+# graph returns nothing. It runs on the keystroke->answer path, so the listing
+# comes from this per-plugin cache and is refreshed over the network only when
+# stale, inside what is left of the recall budget.
+
+_READABLE_DATASETS_CACHE = _PLUGIN_DIR / "readable-datasets.json"
+_READABLE_DATASETS_TTL_DEFAULT = 300.0
+
+
+def cross_dataset_search_command() -> str:
+    """The one-off graph search on another dataset, as the hint and the lister
+    spell it for the model: ``cognee-search.sh "<query>" 10 --graph --dataset-id <id>``."""
+    script = Path(__file__).resolve().parent / "cognee-search.sh"
+    return f'{script} "<query>" 10 --graph --dataset-id <id>'
+
+
+def _readable_datasets_cache_key(service_url: str, api_key: str) -> str:
+    """Server URL + key fingerprint: a listing fetched for another server or
+    identity is never served (the read set is per principal)."""
+    base = _normalize_service_url(service_url) or str(service_url or "").rstrip("/")
+    return hashlib.sha256((base + "\n" + str(api_key or "")).encode("utf-8")).hexdigest()
+
+
+def cached_readable_datasets(
+    *,
+    service_url: str = "",
+    max_age: float | None = None,
+    refresh: bool = True,
+    timeout: float = 2.0,
+) -> list[dict]:
+    """The readable-datasets rows from the cache, refreshed when stale.
+
+    A listing younger than ``max_age`` seconds (``COGNEE_DATASETS_CACHE_TTL``,
+    default 300) is served as-is. Otherwise, when ``refresh`` is allowed, one
+    bounded ``list_readable_datasets`` call rewrites the cache; a refresh that
+    fails falls back to the stale rows rather than to nothing. Never raises:
+    the hint is decoration on the recall path.
+    """
+    service_url = service_url or _local_api_url()
+    key = _readable_datasets_cache_key(service_url, _api_key())
+    if max_age is None:
+        max_age = _float_env("COGNEE_DATASETS_CACHE_TTL", _READABLE_DATASETS_TTL_DEFAULT)
+    cached = _load_json_file(_READABLE_DATASETS_CACHE)
+    rows = cached.get("datasets") if isinstance(cached, dict) else None
+    same_identity = isinstance(cached, dict) and str(cached.get("key") or "") == key
+    if not (same_identity and isinstance(rows, list)):
+        rows = None
+    if rows is not None:
+        try:
+            age = time.time() - float(cached.get("fetched_at") or 0)
+        except (TypeError, ValueError):
+            age = float("inf")
+        if 0 <= age <= max_age:
+            return rows
+    if not refresh:
+        return rows or []
+    try:
+        fresh = list_readable_datasets(timeout=timeout)
+    except Exception as exc:
+        hook_log("readable_datasets_refresh_failed", {"error": str(exc)[:200]})
+        return rows or []
+    _write_json_file(
+        _READABLE_DATASETS_CACHE,
+        {"key": key, "fetched_at": time.time(), "datasets": fresh},
+    )
+    return fresh
+
+
+def other_readable_datasets(rows: list, active_dataset: str = "", active_ids=()) -> list[dict]:
+    """``rows`` minus the launch's active dataset, in listing order, unique by id.
+
+    The active dataset is excluded by every handle it goes by: its canonical
+    UUID and the same-named copies graph recall already spans (``active_ids``,
+    the launch record's ``dataset_ids`` under shared memory), and — when the
+    launch is name-addressed and has no ids — its name.
+    """
+    ids = {str(x).strip() for x in (active_ids or ()) if str(x).strip()}
+    if parse_dataset_id(active_dataset):
+        ids.add(parse_dataset_id(active_dataset))
+    name = str(active_dataset or "").strip()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ident = str(row.get("id") or "")
+        if not ident or ident in seen or ident in ids:
+            continue
+        if not ids and name and str(row.get("name") or "") == name:
+            continue
+        seen.add(ident)
+        out.append(row)
+    return out
 
 
 def resolve_conn_uuid(host_key: str = "") -> str:
