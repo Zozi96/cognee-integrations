@@ -240,8 +240,9 @@ def test_statusline_reads_record_dataset(suite, statusline, temp_home, monkeypat
     )
     monkeypatch.setenv("COGNEE_PLUGIN_DATASET", "from-env")
     assert statusline._active_dataset(HOST) == "from-record"
-    assert "switched" in statusline._switched_marker(HOST)
-    # another launch, or no host id: env still rules and no marker
+    # No "switched" tag: the bar names the dataset it is on, which is the whole
+    # story — the tag only cluttered the line and read as a state to act on.
+    assert not hasattr(statusline, "_switched_marker")
+    # another launch, or no host id: env still rules
     assert statusline._active_dataset("unknown-host") == "from-env"
-    assert statusline._switched_marker("unknown-host") == ""
     assert statusline._active_dataset("../evil") == "from-env"  # path-unsafe id ignored
