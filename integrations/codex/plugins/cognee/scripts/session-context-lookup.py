@@ -27,6 +27,7 @@ from _plugin_common import (
     authed_liveness,
     buffered_saves_segments,
     cached_readable_datasets,
+    clear_payment_required,
     clear_slow_streak,
     cross_dataset_search_command,
     elapsed_ms,
@@ -42,6 +43,7 @@ from _plugin_common import (
     read_and_reset_save_counter,
     read_connection_state,
     recall_via_http,
+    record_payment_required,
     record_slow_probe,
     resolve_active_dataset_ids,
     resolve_runtime_mode,
@@ -450,6 +452,7 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     scope_timeouts = 0
     server_down = False
     auth_rejected = False  # 401/403: the server answered and rejected OUR key
+    payment_refused = False  # 402: the tenant cannot pay for this recall
     server_errors = 0  # 5xx answers: reachable but failing
 
     # Below the floor a call cannot return anything useful, so nothing is
@@ -546,6 +549,8 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             scopes_answered_err += 1
             if exc.code in (401, 403):
                 auth_rejected = True
+            elif exc.code == 402:
+                payment_refused = True
             elif exc.code >= 500:
                 server_errors += 1
         elif verdict == SLOW:
@@ -556,6 +561,15 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             "recall_error",
             {"scope": scope_list, "error": str(exc)[:200], "verdict": verdict},
         )
+    # Status-line credits: a 402 is the server refusing to pay for THIS recall,
+    # the one positive exhaustion signal the plugin sees. Note it on the
+    # tenant's marker entry; a recall that got through clears the note. Both
+    # are best-effort and never raise.
+    if payment_refused:
+        record_payment_required("recall")
+    elif scopes_ok:
+        clear_payment_required()
+
     # The scopes were all in flight together, so there is nothing left to cut
     # short; these mark the prompt-level verdict for the health accounting.
     if server_down:

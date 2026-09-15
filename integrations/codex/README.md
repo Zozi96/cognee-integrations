@@ -269,7 +269,7 @@ A Cognee session never spans two datasets, so the switch:
    then releases the old handle (register-then-unregister, so a local agent-mode server never
    sees zero connections);
 3. repoints this launch's record so every hook, the shell wrappers, the idle/exit watchers and
-   the in-context status line follow it (it gains a `· switched` tag on the next prompt).
+   the in-context status line follow it on the next prompt.
 
 The choice lives in the launch record (`~/.cognee-plugin/codex/sessions/<host id>.json`), so it
 survives a resume and beats the shell's `COGNEE_PLUGIN_DATASET` (and a pinned

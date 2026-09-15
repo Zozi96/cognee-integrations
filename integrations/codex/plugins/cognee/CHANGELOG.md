@@ -13,6 +13,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.6.6]
 
 ### Added
+- **The status bar says when credits are not enough, and where to top up.** Until now a
+  cloud tenant that ran out of credits saw nothing: every recall, save and improve came
+  back `HTTP 402 Payment Required`, the plugin logged it as a generic `recall_error` and
+  moved on, and the credits segment kept showing the last balance it had read — or
+  nothing at all on a tenant whose billing overview could not be fetched. Now a 402 from
+  any billable route (recall, trace/answer save, `/remember`, improve) is recorded on the
+  tenant's credits marker as `payment_required: {op, at}`, and the segment renders it:
+  - balance above a dollar but refused: `credits: $2.04 (not enough for recall)`;
+  - a dollar or less left: `credits: $0.61 · top up: https://platform.cognee.ai/billing` —
+    the cloud refuses requests before the balance reaches zero, so the threshold is a
+    dollar, not zero;
+  - refused with no balance reading at all (the platform fetch itself failed): `credits: not enough for recall`, with the top-up link.
+
+  The top-up link is the production billing page; staging and dev sessions set
+  `COGNEE_BILLING_URL` (the web frontend's host is not derivable from the tenant host).
+  The platform API host the balance is fetched from IS derived from the service URL:
+  beside a `tenant-<id>.<env>.cognee.ai` data plane it is `api.<env>.cognee.ai`, so a dev
+  tenant asks the dev platform instead of production (which answered `401` and left the
+  segment blank). A non-tenant URL falls back to the production platform;
+  `COGNEE_PLATFORM_API_URL` overrides.
+
+  The next billable operation that succeeds clears the note, so a top-up shows through
+  on the following prompt. The note is written under the same per-tenant lock as the
+  balance and survives the balance refresh: a small positive balance can still be "not
+  enough", and only a successful operation knows otherwise. New events:
+  `credits_payment_required`, `credits_payment_cleared`, `credits_marker_write_failed`.
 - **Search another dataset without switching.** Recall reads only the active dataset,
   so information living in another dataset was invisible unless the user switched —
   a full switch (sync, new Cognee session, repointed launch record) just to look
@@ -43,6 +69,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
     dataset is named — nothing ranks them, so the user chooses.
   - New hook events: `recall.dataset_hint`, `datasets.readable_refresh_failed`,
     `datasets.list_failed`.
+
+### Removed
+- **The `· switched` status-line tag.** After `/cognee-switch-datasets` the bar appended
+  a faint `· switched` after the mode. The dataset name beside it already says which
+  dataset the session is on, so the tag added nothing, cluttered the line, and read
+  as a state that wanted acting on. Gone; the launch record still carries
+  `switched_at` for the hooks.
 
 ## [1.6.5]
 

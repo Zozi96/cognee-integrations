@@ -38,6 +38,8 @@ _TENANT_ID = "f8c21da4-6674-4cc5-bc56-de5e93db881d"
 _CLOUD_URL = f"https://tenant-{_TENANT_ID}.aws.cognee.ai"
 _OTHER_TENANT = "0b54dcbd-6b52-4b3e-a1dd-9d251e0f31bb"
 
+_BILLING = "https://platform.cognee.ai/billing"
+
 _GREEN = "\033[32m"
 _RED = "\033[31m"
 _FAINT = "\033[2m"
@@ -139,7 +141,7 @@ def test_balance_renders_two_decimals(sl):
 
 def test_negative_balance_renders_with_sign(sl):
     _marker(sl, remaining_usd=-158.86)
-    assert strip_ansi(sl._credits_segment()) == " · credits: -$158.86"
+    assert strip_ansi(sl._credits_segment()) == f" · credits: -$158.86 · top up: {_BILLING}"
 
 
 def test_thousands_separator(sl):
@@ -243,7 +245,8 @@ def test_balance_is_green(styled):
 
 def test_negative_balance_is_red(styled):
     _marker(styled, remaining_usd=-158.86)
-    assert styled._credits_segment() == f" · {_RED}credits: -$158.86{_RESET}"
+    expected = f" · {_RED}credits: -$158.86{_RESET} · {_GREEN}top up: {_BILLING}{_RESET}"
+    assert styled._credits_segment() == expected
 
 
 def test_age_hint_is_faint(styled):
@@ -325,3 +328,145 @@ def test_hooks_json_wires_credits_refresh_at_turn_end(suite):
         for hook in entries:
             assert "async" not in hook, f"{suite.name} skips async hooks entirely"
             assert isinstance(hook.get("timeout"), (int, float)) and hook["timeout"] <= 15
+
+
+# ── low balance and 402 refusals ───────────────────────────────────────────
+#
+# Two signals, two renderings. The balance reading comes from the billing
+# overview; the 402 note comes from a billable request the server refused
+# ("not enough credits for THIS operation"). A dollar or less is red with the
+# top-up link — not zero: the cloud refuses requests with cents still left, so
+# zero is never observed. A refusal above a dollar keeps the (green) number and
+# adds a red qualifier; a refusal with no balance reading at all (the billing
+# fetch itself failed) is the whole segment, with the link.
+
+
+def _refused(op="recall", age=0.0):
+    return {"op": op, "at": time.time() - age}
+
+
+@pytest.mark.parametrize("remaining, shown", [(1.0, "$1.00"), (0.37, "$0.37"), (0.0, "$0.00")])
+def test_a_dollar_or_less_shows_the_top_up_link(sl, remaining, shown):
+    _marker(sl, remaining_usd=remaining)
+    assert strip_ansi(sl._credits_segment()) == f" · credits: {shown} · top up: {_BILLING}"
+
+
+def test_just_above_a_dollar_shows_no_top_up_link(sl):
+    _marker(sl, remaining_usd=1.01)
+    assert strip_ansi(sl._credits_segment()) == " · credits: $1.01"
+
+
+def test_threshold_is_one_dollar(sl):
+    assert sl._CREDITS_LOW_USD == 1.0
+
+
+def test_refusal_above_a_dollar_keeps_the_balance_and_names_the_operation(sl):
+    _marker(sl, remaining_usd=2.04, payment_required=_refused("recall"))
+    assert strip_ansi(sl._credits_segment()) == " · credits: $2.04 (not enough for recall)"
+
+
+def test_refusal_above_a_dollar_shows_no_top_up_link(sl):
+    _marker(sl, remaining_usd=2.04, payment_required=_refused("remember"))
+    assert "top up" not in sl._credits_segment()
+
+
+def test_refusal_at_a_low_balance_is_not_repeated_as_a_qualifier(sl):
+    """Under a dollar the red number already says it; the qualifier would be noise."""
+    _marker(sl, remaining_usd=0.04, payment_required=_refused("recall"))
+    assert strip_ansi(sl._credits_segment()) == f" · credits: $0.04 · top up: {_BILLING}"
+
+
+def test_refusal_without_a_balance_is_the_whole_segment(sl):
+    """A dev tenant cannot fetch its balance (the platform host 401s), so the
+    402 is the only credits signal it ever gets — it must still render."""
+    _marker(sl, {"url:" + _CLOUD_URL: {"base_url": _CLOUD_URL, "payment_required": _refused()}})
+    expected = f" · credits: not enough for recall · top up: {_BILLING}"
+    assert strip_ansi(sl._credits_segment()) == expected
+
+
+def test_refusal_survives_a_stale_balance_reading(sl):
+    """Past the prune horizon the number is gone, but a fresh refusal still shows."""
+    _marker(
+        sl,
+        remaining_usd=3.0,
+        checked_at=time.time() - 8 * 24 * 3600,
+        payment_required=_refused("save"),
+    )
+    expected = f" · credits: not enough for save · top up: {_BILLING}"
+    assert strip_ansi(sl._credits_segment()) == expected
+
+
+def test_stale_refusal_is_ignored(sl):
+    _marker(sl, remaining_usd=2.04, payment_required=_refused("recall", age=8 * 24 * 3600))
+    assert strip_ansi(sl._credits_segment()) == " · credits: $2.04"
+
+
+def test_malformed_refusal_is_ignored(sl):
+    _marker(sl, remaining_usd=2.04, payment_required={"at": time.time()})
+    assert strip_ansi(sl._credits_segment()) == " · credits: $2.04"
+    _marker(sl, remaining_usd=2.04, payment_required="recall")
+    assert strip_ansi(sl._credits_segment()) == " · credits: $2.04"
+
+
+def test_top_up_link_comes_last(sl):
+    """After the cost and the age hint: the link is the way out, read last."""
+    _marker(
+        sl,
+        remaining_usd=0.61,
+        checked_at=time.time() - 20 * 60,
+        last_op={"label": "turn", "cost_usd": 0.02, "at": time.time()},
+    )
+    expected = f" · credits: $0.61 · last turn ~$0.02 (20m ago) · top up: {_BILLING}"
+    assert strip_ansi(sl._credits_segment()) == expected
+
+
+def test_billing_url_env_override(sl, monkeypatch):
+    monkeypatch.setenv("COGNEE_BILLING_URL", "https://billing.example.test/")
+    _marker(sl, remaining_usd=0.5)
+    assert strip_ansi(sl._credits_segment()).endswith(" · top up: https://billing.example.test/")
+
+
+def test_billing_url_is_the_production_page_for_every_tenant(sl, monkeypatch):
+    """The frontend host is not derivable from the tenant host (aws -> platform,
+    dev-aws -> staging is a lookup, not a rule), so it stays a constant and
+    staging/dev sessions override it."""
+    dev = f"https://tenant-{_TENANT_ID}.dev-aws.cognee.ai"
+    monkeypatch.setenv("COGNEE_BASE_URL", dev)
+    _marker(sl, {_TENANT_ID: _entry(remaining_usd=0.5, base_url=dev)})
+    assert strip_ansi(sl._credits_segment()) == f" · credits: $0.50 · top up: {_BILLING}"
+    monkeypatch.setenv("COGNEE_BILLING_URL", "https://staging.cognee.ai/billing")
+    expected = " · credits: $0.50 · top up: https://staging.cognee.ai/billing"
+    assert strip_ansi(sl._credits_segment()) == expected
+
+
+def test_low_balance_is_red_and_the_link_is_green(styled):
+    _marker(styled, remaining_usd=0.61)
+    expected = f" · {_RED}credits: $0.61{_RESET} · {_GREEN}top up: {_BILLING}{_RESET}"
+    assert styled._credits_segment() == expected
+
+
+def test_a_dollar_exactly_is_red(styled):
+    _marker(styled, remaining_usd=1.0)
+    assert styled._credits_segment().startswith(f" · {_RED}credits: $1.00{_RESET}")
+
+
+def test_refusal_above_a_dollar_colours_only_the_qualifier(styled):
+    """The number is still a healthy balance (green); the refusal is what is red."""
+    _marker(styled, remaining_usd=2.04, payment_required=_refused("recall"))
+    expected = f" · {_GREEN}credits: $2.04{_RESET} {_RED}(not enough for recall){_RESET}"
+    assert styled._credits_segment() == expected
+
+
+def test_refusal_without_a_balance_is_red_with_a_green_link(styled):
+    _marker(styled, {"url:" + _CLOUD_URL: {"base_url": _CLOUD_URL, "payment_required": _refused()}})
+    expected = (
+        f" · {_RED}credits: not enough for recall{_RESET} · {_GREEN}top up: {_BILLING}{_RESET}"
+    )
+    assert styled._credits_segment() == expected
+
+
+def test_low_segment_has_no_ansi_escapes(plain):
+    _marker(plain, remaining_usd=0.61, payment_required=_refused())
+    assert "\033" not in plain._credits_segment()
+    _marker(plain, remaining_usd=2.04, payment_required=_refused())
+    assert "\033" not in plain._credits_segment()

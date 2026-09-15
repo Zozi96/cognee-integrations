@@ -52,6 +52,43 @@ _CREDITS_PATH = _SHARED_ROOT / "antigravity" / "credits.json"
 # marker's own prune horizon (`_plugin_common._CREDITS_ENTRY_MAX_AGE_SECONDS`).
 _CREDITS_AGE_HINT_SECONDS = 15 * 60
 _CREDITS_MAX_AGE_SECONDS = 7 * 24 * 3600
+# A balance at or below this is "running out": the number turns red and the
+# top-up link appears. Not zero — the cloud stops serving before the balance
+# reaches zero (a 402 arrives with cents left), so zero is never observed.
+_CREDITS_LOW_USD = 1.0
+# Where to top up. Shown next to a low balance and next to a 402 refusal that
+# arrived without any balance reading. The production billing page, hardcoded:
+# the web frontend's host cannot be derived from the tenant's data-plane host
+# (``tenant-<id>.aws.cognee.ai`` pairs with ``platform.cognee.ai``, but
+# ``tenant-<id>.dev-aws.cognee.ai`` pairs with ``staging.cognee.ai`` — a lookup,
+# not a rule). Staging/dev sessions set ``COGNEE_BILLING_URL``.
+_BILLING_URL_DEFAULT = "https://platform.cognee.ai/billing"
+
+
+def _billing_url() -> str:
+    return os.environ.get("COGNEE_BILLING_URL", "").strip() or _BILLING_URL_DEFAULT
+
+
+def _payment_required_op(entry: dict) -> str:
+    """The operation the server last refused with HTTP 402, or "".
+
+    The hooks stamp ``payment_required: {op, at}`` on the tenant's entry when a
+    billable request comes back 402 and remove it on the next success. Stale
+    notes (older than the marker's prune horizon) are ignored: nothing has been
+    tried against this tenant for a week, so nothing is known about it.
+    """
+    note = entry.get("payment_required")
+    if not isinstance(note, dict):
+        return ""
+    op = str(note.get("op") or "").strip()
+    if not op:
+        return ""
+    try:
+        if time.time() - float(note.get("at", 0) or 0) > _CREDITS_MAX_AGE_SECONDS:
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return op
 
 
 def _credits_age_hint(age_seconds: float) -> str:
@@ -102,14 +139,6 @@ def _active_dataset(host_id: str = "") -> str:
         return v
     # 3. default
     return _DEFAULT_DATASET
-
-
-def _switched_marker(host_id: str = "") -> str:
-    """A plain ``· switched`` tag once the launch left its launch-time dataset
-    (this bar goes into the model's context, so no styling)."""
-    if _launch_record(host_id).get("switched_at"):
-        return " · switched"
-    return ""
 
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1", ""}
@@ -462,16 +491,28 @@ def _credits_segment() -> str:
         return ""
     remaining = entry.get("remaining_usd")
     if not isinstance(remaining, (int, float)) or isinstance(remaining, bool):
-        return ""
-    try:
-        checked_at = float(entry.get("checked_at", 0) or 0)
-    except (TypeError, ValueError):
-        return ""
-    age = time.time() - checked_at
-    if age > _CREDITS_MAX_AGE_SECONDS:
-        return ""
+        remaining = None
+    age = 0.0
+    if remaining is not None:
+        try:
+            age = time.time() - float(entry.get("checked_at", 0) or 0)
+        except (TypeError, ValueError):
+            remaining = None
+        if age > _CREDITS_MAX_AGE_SECONDS:
+            remaining = None
+    refused_op = _payment_required_op(entry)
+    if remaining is None:
+        if not refused_op:
+            return ""
+        # The server refused to pay for an operation but there is no balance to
+        # show (the billing fetch itself failed): the refusal is the segment, and
+        # the way out is the same as for a low balance — top up.
+        return f" · credits: not enough for {refused_op}{_top_up_hint()}"
+    exhausted = remaining <= _CREDITS_LOW_USD
     sign = "-" if remaining < 0 else ""
     seg = f" · credits: {sign}${abs(remaining):,.2f}"
+    if refused_op and not exhausted:
+        seg += f" (not enough for {refused_op})"
     last_op = entry.get("last_op")
     if isinstance(last_op, dict):
         label = str(last_op.get("label") or "").strip()
@@ -481,7 +522,14 @@ def _credits_segment() -> str:
     hint = _credits_age_hint(age)
     if hint:
         seg += f" ({hint})"
+    if exhausted:
+        seg += _top_up_hint()
     return seg
+
+
+def _top_up_hint() -> str:
+    """A plain URL: the host line carries no styling, and terminals linkify it."""
+    return f" · top up: {_billing_url()}"
 
 
 def render_status_for_host(host_id: str) -> str:
@@ -490,7 +538,6 @@ def render_status_for_host(host_id: str) -> str:
     return (
         f"{_status_prefix(str(host_id or ''))}"
         f"cognee: {_active_dataset(str(host_id or ''))} · {_active_mode()}"
-        f"{_switched_marker(str(host_id or ''))}"
         f"{_credits_segment()}{_update_segment()}"
     )
 
@@ -522,7 +569,7 @@ def main() -> None:
     host_id = str(ctx.get("session_id") or ctx.get("thread_id") or "")
     sys.stdout.write(
         f"{_status_prefix()}"
-        f"cognee: {_active_dataset(host_id)} · {_active_mode()}{_switched_marker(host_id)}"
+        f"cognee: {_active_dataset(host_id)} · {_active_mode()}"
         f"{_credits_segment()}{_update_segment()}"
     )
 

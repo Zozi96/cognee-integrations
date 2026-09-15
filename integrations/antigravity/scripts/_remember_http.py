@@ -311,8 +311,18 @@ def main(argv):
         try:
             os.environ.setdefault("COGNEE_PLUGIN_IN_VENV", "1")
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from _plugin_common import refresh_credits
+            from _plugin_common import (
+                clear_payment_required,
+                record_payment_required,
+                refresh_credits,
+            )
 
+            # A 402 is the server refusing to pay for this remember; note it
+            # for the status line. A remember that got through clears the note.
+            if isinstance(result, dict) and result.get("status") == 402:
+                record_payment_required("remember")
+            elif isinstance(result, dict) and not result.get("error"):
+                clear_payment_required()
             refresh_credits("remember")
         except Exception:
             pass
