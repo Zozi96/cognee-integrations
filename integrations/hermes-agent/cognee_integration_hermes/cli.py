@@ -138,7 +138,7 @@ def _connect_backend():
 
 
 def _run_index_repo(args) -> int:
-    """Index one repository into a deterministic code graph (cognee >= 1.5.3)."""
+    """Index one repository into a deterministic code graph (cognee >= 1.5.4)."""
     spec = code_graph.canonical_spec(str(args.repo))
     if not code_graph.is_remote_repo(spec) and not Path(spec).is_dir():
         print(f"Error: {args.repo!r} is not a directory or a recognized git URL.")
@@ -263,7 +263,7 @@ def register_cli(subparser) -> None:
     )
     index = subs.add_parser(
         "index-repo",
-        help="Index a repository into a deterministic Cognee code graph (cognee >= 1.5.3)",
+        help="Index a repository into a deterministic Cognee code graph (cognee >= 1.5.4)",
     )
     index.add_argument("repo", help="Local path or git URL of the repository")
     index.add_argument(

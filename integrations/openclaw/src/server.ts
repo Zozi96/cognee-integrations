@@ -43,7 +43,7 @@ const ENSURE_SCRIPT_CONTENT = [
   "READY_MARKER = os.path.join(BASE, '.venv-ready.json')",
   "ERROR_MARKER = os.path.join(BASE, '.venv-error.json')",
   "INSTALL_LOCK = os.path.join(BASE, 'venv-install.lock')",
-  "COGNEE_VERSION = '1.5.3'",
+  "COGNEE_VERSION = '1.5.4'",
   "",
   "# Self-daemonize so the caller returns immediately.",
   "if '--daemon' not in sys.argv:",

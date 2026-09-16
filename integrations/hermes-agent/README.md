@@ -402,7 +402,7 @@ hermes cognee index-repo ~/work/my-service --wait 120 # block until queryable
 
 Each repository gets its own `codebase-<repo>-<digest>` dataset. Indexing is
 deterministic — no LLM or embedding calls on either side (add semantic search
-over code entities with `--index-vectors`). Requires a cognee server >= 1.5.3.
+over code entities with `--index-vectors`). Requires a cognee server >= 1.5.4.
 
 Once indexed, two things light up in a Hermes session:
 

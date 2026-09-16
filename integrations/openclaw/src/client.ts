@@ -764,7 +764,9 @@ export class CogneeHttpClient {
    * POST /api/v1/remember with content_type="code": index one repository
    * (local path the server can read, or a git URL it clones) into a code-graph
    * dataset via the enola pipeline. No LLM/embedding calls unless
-   * indexVectors. Requires cognee >= 1.5.3 (older servers reject content_type).
+   * indexVectors. Requires cognee >= 1.5.4: 1.5.3 opened content_type="code"
+   * but read the repo spec from a field named `repositories`, which 1.5.4
+   * renamed to `raw_data` (see issue #420).
    */
   async indexRepository(params: {
     datasetName: string;
@@ -776,7 +778,9 @@ export class CogneeHttpClient {
     const formData = new FormData();
     formData.append("datasetName", params.datasetName);
     formData.append("content_type", "code");
-    formData.append("repositories", params.repository);
+    // A 1.5.4 server drops the old `repositories` part silently (unknown Form
+    // fields are ignored), so the spec never arrives and the index 400s.
+    formData.append("raw_data", params.repository);
     formData.append("run_in_background", params.runInBackground === false ? "false" : "true");
     formData.append("index_vectors", params.indexVectors ? "true" : "false");
     return this.fetchAPI<CogneeRememberResponse>(path, { method: "POST", body: formData }, this.ingestionTimeoutMs);

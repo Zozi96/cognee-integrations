@@ -22,6 +22,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
   prefetch costs the slowest lane, not the sum. The rendered blocks keep their
   canonical order whichever lane answers first; a failing lane still never
   discards the others, and the breaker still sees one verdict per turn.
+- **cognee pinned to exactly 1.5.4** (`pyproject.toml`, `plugin.yaml`), up from 1.5.3.
+  The floor moves because code-graph indexing only reads `raw_data` from 1.5.4 on;
+  `content_type="code"`, the `code` recall scope and targeted session invalidation on
+  document delete still date from 1.5.3. The installed package doubles as the local
+  server this plugin spawns, so the pin and the wire contract have to move together.
+
+### Fixed
+- **Repo indexing submitted the repository under a field the server had stopped
+  reading, so every index 400'd ([#420](https://github.com/topoteretes/cognee-integrations/issues/420)).**
+  cognee 1.5.4 renamed the form field that carries the repository spec on
+  `POST /api/v1/remember` with `content_type=code` from `repositories` to
+  `raw_data`. `hermes cognee index-repo` still sent the old name, and an unrecognised multipart part is
+  dropped by the server rather than refused — so each request arrived naming no
+  repository at all and came back `HTTP 400: content_type='code' requires at least
+  one repository path or git URL in 'raw_data'`. Local paths and git URLs failed
+  alike. The spec now goes in `raw_data`.
+- **A 400 the server could explain was reported as "your server is too old".** The
+  error branch treated any 400 whose body mentioned `content_type` as a server
+  predating `content_type='code'`. Every 400 the server's code branch raises names
+  that field — including the one above — so the actionable message was overwritten
+  with advice to upgrade a deployment that was already new enough, and the reporter
+  of #420 spent the session chasing the wrong problem. Only the server's own
+  "Unsupported content_type" wording counts as a version problem now; every other
+  400 is passed through verbatim.
 
 ## [1.2.1]
 

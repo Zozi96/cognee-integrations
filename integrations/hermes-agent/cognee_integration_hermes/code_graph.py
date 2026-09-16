@@ -4,9 +4,10 @@ Ported from the claude-code/codex plugins' ``_code_graph.py``, minus transport
 (the :class:`~.backend.MemoryBackend` owns that) and minus the freshness /
 auto-index machinery: Hermes sessions are rarely launched inside a checkout,
 so repositories are indexed explicitly — ``hermes cognee index-repo`` — the
-way the OpenClaw plugin chose too. Requires a cognee server >= 1.5.3 (the
-release that opened ``content_type="code"`` on /api/v1/remember and the
-``code`` recall scope).
+way the OpenClaw plugin chose too. Requires a cognee server >= 1.5.4:
+1.5.3 opened ``content_type="code"`` on /api/v1/remember and the ``code``
+recall scope, and 1.5.4 renamed the repo-spec form field from
+``repositories`` to ``raw_data``.
 
 Two responsibilities:
 

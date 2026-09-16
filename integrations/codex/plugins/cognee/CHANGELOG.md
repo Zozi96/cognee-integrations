@@ -77,6 +77,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
   as a state that wanted acting on. Gone; the launch record still carries
   `switched_at` for the hooks.
 
+### Fixed
+- **Repo indexing submitted the repository under a field the server had stopped
+  reading, so every index 400'd ([#420](https://github.com/topoteretes/cognee-integrations/issues/420)).**
+  cognee 1.5.4 renamed the form field that carries the repository spec on
+  `POST /api/v1/remember` with `content_type=code` from `repositories` to
+  `raw_data`. The plugin still sent the old name, and an unrecognised multipart part is
+  dropped by the server rather than refused — so each request arrived naming no
+  repository at all and came back `HTTP 400: content_type='code' requires at least
+  one repository path or git URL in 'raw_data'`. Local paths and git URLs failed
+  alike. The spec now goes in `raw_data`. The bundled server has been pinned to 1.5.4
+  since the previous release, so a fresh install hit this on its first
+  `/cognee-code`.
+- **A 400 the server could explain was reported as "your server is too old".** The
+  error branch treated any 400 whose body mentioned `content_type` as a server
+  predating `content_type='code'`. Every 400 the server's code branch raises names
+  that field — including the one above — so the actionable message was overwritten
+  with advice to upgrade a deployment that was already new enough, and the reporter
+  of #420 spent the session chasing the wrong problem. Only the server's own
+  "Unsupported content_type" wording counts as a version problem now; every other
+  400 is passed through verbatim.
+
 ## [1.6.5]
 
 ### Fixed

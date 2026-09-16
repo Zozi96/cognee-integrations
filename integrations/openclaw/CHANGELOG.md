@@ -27,6 +27,20 @@ date-based (`YYYY.M.D`), matching the OpenClaw plugin ecosystem.
   is cleared once an install succeeds. README gains a Requirements section:
   Python 3.9+ for the bootstrap, 3.10+ only for the uv-less fallback, none in
   cloud mode. Shipped in place, without a version bump.
+- **Repo indexing submitted the repository under a field the server had stopped
+  reading, so every index 400'd ([#420](https://github.com/topoteretes/cognee-integrations/issues/420)).**
+  cognee 1.5.4 renamed the form field that carries the repository spec on
+  `POST /api/v1/remember` with `content_type=code` from `repositories` to
+  `raw_data`. `openclaw cognee index-repo` still sent the old name, and an unrecognised multipart part is
+  dropped by the server rather than refused — so each request arrived naming no
+  repository at all and came back `HTTP 400: content_type='code' requires at least
+  one repository path or git URL in 'raw_data'`. Local paths and git URLs failed
+  alike. The spec now goes in `raw_data`.
+- **Every failed index blamed the server version.** The branch matched `/\(400\)/`
+  — *any* 400 at all — and appended "code indexing requires Cognee >= 1.5.3" to it,
+  so a bad path, a disabled local-path setting and the field mismatch above all
+  printed the same misleading advice. It now matches the server's "Unsupported
+  content_type" wording only.
 
 ### Changed
 - **Per-prompt recall waits long enough for growing graphs.** `recallTimeoutMs`
@@ -36,6 +50,17 @@ date-based (`YYYY.M.D`), matching the OpenClaw plugin ecosystem.
   (cloud) server, and a call that overruns its timeout contributes nothing, so the
   old caps could silently drop graph memory from recall once a graph got large. Both remain configurable; the cheap scopes are unaffected,
   so a fast prompt is not slower.
+- **Bundled server pin bumped to `cognee==1.5.4`** (`src/server.ts`; the venv upgrades
+  on next boot), and `cognee-docker-compose.yaml` now uses `cognee/cognee:1.5.4`.
+  Required by the field rename above, and it re-aligns this plugin with the
+  claude-code/codex/antigravity plugins, which pin 1.5.4 and share the same
+  `~/.cognee-plugin/venv`: while the pins differed, a cold boot by either side
+  flipped the venv to its own version and re-ran that release's migrations over a
+  database the other had written. The drift guard that exists to catch exactly this
+  (`integrations/tests/tests/unit/test_cognee_pin.py`) was resolving `src/server.ts`
+  one directory too high, so it had been passing as an expected failure on a missing
+  file rather than on the pin; the path is fixed and the pin agreement is now
+  enforced.
 
 ## [2026.9.2]
 

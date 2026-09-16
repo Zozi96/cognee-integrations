@@ -391,7 +391,7 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 
 ### Code graph (repositories)
 
-Cognee can index a whole repository into a deterministic **code graph** (the enola pipeline — no LLM or embedding calls) and answer structural questions exactly: who calls X, what breaks if X changes, how A reaches B, all routes. OpenClaw agents are rarely launched inside a checkout, so unlike the claude-code/codex plugins nothing is indexed automatically; the operator opts a repository in and the model gets a tool. Requires Cognee ≥ 1.5.3.
+Cognee can index a whole repository into a deterministic **code graph** (the enola pipeline — no LLM or embedding calls) and answer structural questions exactly: who calls X, what breaks if X changes, how A reaches B, all routes. OpenClaw agents are rarely launched inside a checkout, so unlike the claude-code/codex plugins nothing is indexed automatically; the operator opts a repository in and the model gets a tool. Requires Cognee ≥ 1.5.4.
 
 ```bash
 # Local path (the Cognee server must share this filesystem — the default local server does)
@@ -488,7 +488,7 @@ Move **one conversation** to another Cognee dataset — the OpenClaw counterpart
 
 In multi-scope mode only the **agent** scope is repointed; `company`/`user` memory stays shared. Memory-file sync keeps following `scopeRouting` — the switch moves the conversation's memory, not the agent's files. Overrides persist across gateway restarts in `~/.openclaw/memory/cognee/dataset-overrides.json`. Set `datasetSwitchTool: false` to not register it.
 
-The plugin's bundled server pin is `cognee==1.5.3` (`src/server.ts`; the venv is upgraded automatically on next boot) and `cognee-docker-compose.yaml` uses `cognee/cognee:1.5.3`.
+The plugin's bundled server pin is `cognee==1.5.4` (`src/server.ts`; the venv is upgraded automatically on next boot) and `cognee-docker-compose.yaml` uses `cognee/cognee:1.5.4`. This matches the claude-code/codex/antigravity plugins, which share the same `~/.cognee-plugin/venv`.
 
 ### Memory-hit visibility
 
