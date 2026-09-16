@@ -8,7 +8,7 @@ most importantly ``session_ids`` on ``improve()``, which is what bridges session
 memory into the permanent graph.
 
 **Wire contract** (first verified against cognee 1.2.1's routers, live-checked
-on the pinned 1.5.3):
+on the pinned 1.5.4):
 
 ===================  =========================================================
 ``recall``           ``POST /api/v1/recall``   JSON: ``query``, ``search_type``,
@@ -29,8 +29,9 @@ on the pinned 1.5.3):
 ``list_dataset_data`` ``GET /api/v1/datasets/{id}/data``
 ``read_raw_data``    ``GET /api/v1/datasets/{id}/data/{id}/raw``
 ``index_repository`` ``POST /api/v1/remember`` multipart: ``datasetName``,
-                     ``content_type=code``, ``repositories``,
-                     ``run_in_background``, ``index_vectors`` (cognee >= 1.5.3)
+                     ``content_type=code``, ``raw_data``,
+                     ``run_in_background``, ``index_vectors`` (cognee >= 1.5.4;
+                     1.5.3 called the repo-spec field ``repositories``)
 ``dataset_pipeline_status`` ``GET /api/v1/datasets/status?dataset=&pipeline=``
 ===================  =========================================================
 
@@ -740,7 +741,7 @@ class HttpBackend(MemoryBackend):
         result = self._request("POST", "/api/v1/forget", timeout=timeout, json_body=body)
         return result if isinstance(result, dict) else {}
 
-    # -- code graph (cognee >= 1.5.3) ----------------------------------------
+    # -- code graph (cognee >= 1.5.4) ----------------------------------------
 
     def index_repository(
         self,
@@ -756,7 +757,11 @@ class HttpBackend(MemoryBackend):
             {
                 "datasetName": dataset,
                 "content_type": "code",
-                "repositories": str(repo),
+                # cognee >= 1.5.4 reads the repo spec from raw_data; 1.5.3
+                # called the field repositories. A 1.5.4 server ignores the old
+                # name outright (unknown Form parts are dropped), so the spec
+                # never arrives and the index 400s — see issue #420.
+                "raw_data": str(repo),
                 "run_in_background": "true" if run_in_background else "false",
                 "index_vectors": "true" if index_vectors else "false",
             },
@@ -767,12 +772,17 @@ class HttpBackend(MemoryBackend):
                 "POST", "/api/v1/remember", timeout=timeout, multipart=multipart
             )
         except CogneeHttpError as exc:
-            if exc.status == 400 and "content_type" in str(exc):
-                # An older server (< 1.5.3) rejects content_type='code' outright.
+            if exc.status == 400 and "unsupported content_type" in str(exc).lower():
+                # An older server rejects the content_type value outright, and
+                # says so in those words. Matching a bare "content_type"
+                # substring would also swallow a current server's code-branch
+                # 400s (which all name the field), reporting a contract or
+                # argument error as "your server is too old". Those re-raise
+                # unchanged, so the caller sees the server's own message.
                 raise CogneeHttpError(
                     exc.status,
                     "the cognee server rejected content_type='code' — repo indexing "
-                    "requires cognee >= 1.5.3; upgrade the server and retry. "
+                    "requires cognee >= 1.5.4; upgrade the server and retry. "
                     f"Detail: {exc}",
                 ) from exc
             raise

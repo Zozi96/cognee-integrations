@@ -294,6 +294,25 @@ describe("memory verbs send what the server expects", () => {
     expect(mock.assertCalled("POST", "/agents/unregister")).toBeTruthy();
   });
 
+  it("indexRepository sends the repo spec as raw_data, not repositories", async () => {
+    // Load-bearing and silent when wrong: cognee 1.5.4 renamed this form field
+    // from `repositories`, and the server drops an unrecognised multipart part
+    // rather than refusing it — so the old name arrived as a request carrying no
+    // repository at all and 400'd on every repo (issue #420). Asserted on the
+    // raw body because e2e/test_codeGraph.ts mocks indexRepository wholesale and
+    // structurally cannot see the wire.
+    await localClient().indexRepository({
+      datasetName: "codebase-proj",
+      repository: "https://github.com/org/repo",
+    });
+
+    const body = mock.assertCalled("POST", "/remember").body;
+    expect(body).toContain('name="raw_data"');
+    expect(body).toContain("https://github.com/org/repo");
+    expect(body).not.toContain('name="repositories"');
+    expect(body).toContain('name="content_type"');
+  });
+
   it("health reads the status field", async () => {
     await expect(localClient().health()).resolves.toEqual({ status: "ok" });
   });

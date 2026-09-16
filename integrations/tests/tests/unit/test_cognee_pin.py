@@ -2,15 +2,19 @@
 
 claude-code, codex and openclaw all install cognee into the one shared venv and
 each records what it installed in a ready-marker. When their pins differ, every
-cold boot by a different plugin flips the venv to *its* version (1.5.3 -> 1.5.0
--> 1.5.3 ...), each time running that release's migrations over a database the
+cold boot by a different plugin flips the venv to *its* version (1.5.4 -> 1.5.3
+-> 1.5.4 ...), each time running that release's migrations over a database the
 other release wrote. When their marker file names differ, one plugin's marker is
 permanently stale to the other, which then reinstalls on every cold boot.
 
-The claude-code/codex pair is asserted equal here. openclaw is asserted too, as a
-strict xfail: it is known to differ today and is being bumped in its own PR —
-when that lands these flip to XPASS, the strict marker fails the run, and the
-xfail lines get deleted so the agreement is enforced from then on.
+The claude-code/codex pair is asserted equal here, and openclaw's pin now is too:
+it was bumped to match when the code-graph field rename forced a 1.5.4 floor.
+The ready-marker filename still differs and stays a strict xfail until openclaw
+is migrated off ``.venv-ready.json``.
+
+``OPENCLAW_SERVER_TS`` used to resolve one directory too high, so both openclaw
+assertions failed on a missing file and xfailed for a reason that had nothing to
+do with what they claim to check — which is how the pin drift survived unnoticed.
 """
 
 from __future__ import annotations
@@ -20,7 +24,8 @@ import re
 import pytest
 from utils.suites import ALL_SUITES, Suite
 
-OPENCLAW_SERVER_TS = ALL_SUITES[0].scripts_dir.parents[2] / "openclaw" / "src" / "server.ts"
+# scripts_dir is integrations/<suite>/scripts, so parents[1] is integrations/.
+OPENCLAW_SERVER_TS = ALL_SUITES[0].scripts_dir.parents[1] / "openclaw" / "src" / "server.ts"
 
 
 def _python_pin(suite: Suite) -> str:
@@ -54,7 +59,6 @@ def test_claude_code_and_codex_use_the_same_ready_marker():
     assert set(markers.values()) == {"venv-ready.json"}, markers
 
 
-@pytest.mark.xfail(strict=True, reason="openclaw pins its own cognee until its bump PR lands")
 def test_openclaw_pins_the_same_cognee_as_the_python_plugins():
     assert _openclaw(r"COGNEE_VERSION = '([^']+)'") == _python_pin(ALL_SUITES[0])
 

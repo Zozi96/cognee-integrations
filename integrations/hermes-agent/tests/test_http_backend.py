@@ -365,6 +365,68 @@ class TestForgetWireFormat(unittest.TestCase):
         self.assertIs(self._forget(memory_only=True)["memory_only"], True)
 
 
+class TestIndexRepositoryWireFormat(unittest.TestCase):
+    """The code-graph submission, whose field name fails silently when wrong.
+
+    cognee 1.5.4 renamed the repo-spec form field from ``repositories`` to
+    ``raw_data``. An unrecognised multipart part is dropped by the server, not
+    refused, so the old name reached a 1.5.4 server as a request carrying no
+    repository at all and 400'd on every repo (issue #420).
+    """
+
+    def _index(self, **overrides):
+        params = {
+            "repo": "/srv/proj",
+            "dataset": "codebase-proj",
+            "timeout": _TIMEOUT,
+        }
+        params.update(overrides)
+        opener = FakeOpener({"/api/v1/remember": {"status": "running"}})
+        _backend(opener).index_repository(**params)
+        return opener.multipart_fields("/api/v1/remember")
+
+    def test_the_repo_spec_is_sent_as_raw_data(self):
+        fields = self._index()
+        self.assertEqual(fields["raw_data"], "/srv/proj")
+        self.assertNotIn("repositories", fields)
+
+    def test_content_type_and_dataset_accompany_it(self):
+        fields = self._index()
+        self.assertEqual(fields["content_type"], "code")
+        self.assertEqual(fields["datasetName"], "codebase-proj")
+
+    def test_index_vectors_is_off_unless_asked(self):
+        self.assertEqual(self._index()["index_vectors"], "false")
+        self.assertEqual(self._index(index_vectors=True)["index_vectors"], "true")
+
+    def _reject(self, detail):
+        opener = FakeOpener(
+            {
+                "/api/v1/remember": urllib.error.HTTPError(
+                    _URL, 400, detail, {}, io.BytesIO(detail.encode("utf-8"))
+                )
+            }
+        )
+        with self.assertRaises(CogneeHttpError) as caught:
+            _backend(opener).index_repository(repo="/srv/proj", dataset="ds", timeout=_TIMEOUT)
+        return str(caught.exception)
+
+    def test_an_unsupported_content_type_is_reported_as_an_old_server(self):
+        self.assertIn("1.5.4", self._reject("Unsupported content_type 'code'."))
+
+    def test_other_400s_keep_the_servers_own_message(self):
+        """The second half of issue #420: every 400 the code branch raises names
+        `content_type`, so classifying on that substring relabelled the server's
+        actionable complaint as "your server is too old" and sent the reporter
+        chasing a version that was already new enough."""
+        detail = (
+            "content_type='code' requires at least one repository path or git URL in 'raw_data'."
+        )
+        message = self._reject(detail)
+        self.assertNotIn("requires cognee >=", message)
+        self.assertIn(detail, message)
+
+
 class TestConnect(unittest.TestCase):
     def _opener(self, **overrides):
         responses = {

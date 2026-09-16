@@ -803,7 +803,7 @@ const memoryCogneePlugin = {
       cognee
         .command("index-repo")
         .argument("<repo>", "Local repository path (server must share this filesystem) or git URL (server clones it)")
-        .description("Index a code repository into a Cognee code graph (enola pipeline; no LLM calls). Requires Cognee >= 1.5.3")
+        .description("Index a code repository into a Cognee code graph (enola pipeline; no LLM calls). Requires Cognee >= 1.5.4")
         .option("--dataset <name>", "Target dataset (default: codebase-<repo>-<digest>)")
         .option("--index-vectors", "Also embed the extracted code facts so semantic search can see them")
         .option("--wait <seconds>", "Poll the code_graph_pipeline for up to this many seconds")
@@ -857,8 +857,13 @@ const memoryCogneePlugin = {
             await codeRegistry.flush();
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            console.log(/\(400\)/.test(msg)
-              ? `Index failed: ${msg}\nThe server rejected content_type=code — code indexing requires Cognee >= 1.5.3.`
+            // Only an "Unsupported content_type" 400 means the server is too
+            // old — that is the wording it uses. Blaming every 400 on server
+            // age (what the old /\(400\)/ test did) relabels the current
+            // server's own code-branch errors, which name the offending field
+            // and are the actionable message; those print verbatim.
+            console.log(/unsupported content_type/i.test(msg)
+              ? `Index failed: ${msg}\nThe server rejected content_type=code — code indexing requires Cognee >= 1.5.4.`
               : `Index failed: ${msg}`);
             process.exit(1);
             return;
