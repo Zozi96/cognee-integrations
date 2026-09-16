@@ -96,6 +96,12 @@ class Suite:
     #: (PR #405 / "delete old local SDK mode"); Antigravity keeps it, so its
     #: concurrent fan-out has two dispatch paths to pin, not one.
     has_local_sdk_recall: bool
+    #: Capability: the cross-dataset search flow — ``list_readable_datasets`` /
+    #: ``cached_readable_datasets`` in the common module, ``list-datasets.py``,
+    #: the prompt hook's "Other Cognee datasets you can search" hint on every
+    #: answered prompt, and ``cognee-search.sh --dataset-id`` forcing a foreign dataset to a
+    #: graph-only read. claude-code and codex carry it; Antigravity does not.
+    has_cross_dataset_search: bool
 
 
 CLAUDE = Suite(
@@ -116,6 +122,7 @@ CLAUDE = Suite(
     has_precompact_http=True,
     has_single_submit_improve=True,
     has_local_sdk_recall=False,
+    has_cross_dataset_search=True,
 )
 
 CODEX = Suite(
@@ -141,6 +148,7 @@ CODEX = Suite(
     has_precompact_http=True,
     has_single_submit_improve=True,
     has_local_sdk_recall=False,
+    has_cross_dataset_search=True,
 )
 
 ANTIGRAVITY = Suite(
@@ -161,6 +169,7 @@ ANTIGRAVITY = Suite(
     hook_manifest_style="named",
     has_single_submit_improve=False,
     has_local_sdk_recall=True,
+    has_cross_dataset_search=False,
 )
 
 ALL_SUITES = [CLAUDE, CODEX, ANTIGRAVITY]

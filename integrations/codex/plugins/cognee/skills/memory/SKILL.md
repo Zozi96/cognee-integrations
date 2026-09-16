@@ -120,6 +120,44 @@ checkout exists, say the mode is unavailable and use the server search above.
 "${CODEX_PLUGIN_ROOT}/scripts/cognee-cli.sh" search "<code question>" -d <dataset-name> -t CODE -k 10 -f pretty
 ```
 
+### Not found in the active dataset? Offer another one
+
+Search is scoped to this session's **active** dataset. When the server answers
+with an authoritative empty list (or the per-prompt memory header injected an
+"Other Cognee datasets you can search" block), the information may live in
+another dataset the user can read. Do **not** switch datasets for that — a
+switch retires the session. Offer a one-off search instead:
+
+1. List the candidates (every readable dataset, the active one excluded;
+   read-only datasets are searchable and included). Skip this when the hook's
+   hint block already names them:
+
+   ```bash
+   python3 "${CODEX_PLUGIN_ROOT}/scripts/list-datasets.py" --others
+   ```
+
+   The JSON has `current` (`{name, id, ids}`) and `datasets`
+   (`[{name, id, owner_id, current}]`).
+
+2. Codex has no interactive picker outside plan mode, so present a **numbered
+   list** of the dataset names and ask the user to reply with a number, a name,
+   or "no". Only ask when the user is actually trying to recall something — an
+   ordinary prompt with no memory match needs no picker.
+
+3. Run the graph-only search on the chosen dataset **by UUID** (a name only
+   resolves among datasets this identity owns), answer from it, and say which
+   dataset the results came from:
+
+   ```bash
+   ${CODEX_PLUGIN_ROOT}/scripts/cognee-search.sh "<question>" 10 --graph --dataset-id <id>
+   ```
+
+   The wrapper forces graph scope and drops the session id for any dataset
+   other than the active one (session history is bound to the active dataset),
+   noting so on stderr. The active dataset, the Cognee session and where writes
+   go are untouched. If the user then wants that dataset for the rest of the
+   session, use the **cognee-switch-datasets** skill.
+
 ### The server is the source of truth
 
 `cognee-cli` is a thin client over the running Cognee server and can print **empty stdout even when content exists** (a serialization quirk). So:

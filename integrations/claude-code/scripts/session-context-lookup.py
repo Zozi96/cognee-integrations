@@ -26,19 +26,24 @@ from _plugin_common import (
     _float_env,
     authed_liveness,
     buffered_saves_segments,
+    cached_readable_datasets,
+    clear_payment_required,
     clear_slow_streak,
+    cross_dataset_search_command,
     elapsed_ms,
     get_session_key,
     hook_log,
     load_resolved,
     mark_server_ready,
     notify,
+    other_readable_datasets,
     outage_header,
     probe_health,
     quiet_hook_output,
     read_and_reset_save_counter,
     read_connection_state,
     recall_via_http,
+    record_payment_required,
     record_slow_probe,
     resolve_active_dataset_ids,
     resolve_runtime_mode,
@@ -74,6 +79,57 @@ TRUNCATE_GRAPH_CTX = 1500
 # Smallest deadline worth dispatching; with less budget than this, nothing is
 # fired rather than sending every scope a doomed request.
 MIN_SCOPE_TIMEOUT = 0.2
+
+# Cross-dataset search hint. Recall reads the active dataset only, and whether
+# what came back actually answers the user is a judgement only the model can
+# make — graph retrieval is nearest-neighbour, so it returns *something* from
+# any populated dataset, and "zero hits" never happens in practice. So every
+# prompt the server answered carries the list of the other readable datasets
+# and how to run a one-off graph search on one (not a switch), worded for the
+# model to act on only when memory did not answer. The listing comes from the
+# per-plugin cache (``cached_readable_datasets``) and is refreshed only when
+# stale, inside what is left of the recall budget. Every other readable dataset
+# is named: nothing ranks them, so the user picks. COGNEE_RECALL_DATASET_HINT=off
+# disables the hint.
+
+
+def _dataset_hint_enabled() -> bool:
+    raw = os.environ.get("COGNEE_RECALL_DATASET_HINT", "").strip().lower()
+    return raw not in ("0", "false", "off", "no")
+
+
+def _format_dataset_hint(active: str, others: list) -> str:
+    rows = "\n".join(f"  - {row.get('name', '')} [{row.get('id', '')}]" for row in others)
+    return (
+        f"Other Cognee datasets you can search (active: {active or 'unknown'}):\n{rows}\n"
+        "Memory above was recalled from the active dataset only. If the user is asking to recall "
+        "something and that context does not answer it, do not conclude that memory has nothing: "
+        "ask which of these datasets to search, with AskUserQuestion (single select, the dataset "
+        'names as options; more than four → the first three plus a "More…" option and page on '
+        "the next question; say in the question that they can also decline). Do not switch "
+        "datasets. Then run the graph-only search on their choice and say which dataset the "
+        "answer came from:\n"
+        f"  {cross_dataset_search_command()}"
+    )
+
+
+def _other_datasets_hint(active: str, active_ids: list, service_url: str, deadline: float) -> str:
+    """The hint block, or "" when there is no other dataset to offer.
+
+    Cache first; one bounded network refresh only when the cache is stale and
+    the recall budget still has room for an honest attempt.
+    """
+    remaining = deadline - time.monotonic()
+    rows = cached_readable_datasets(
+        service_url=service_url,
+        refresh=remaining >= MIN_SCOPE_TIMEOUT,
+        timeout=max(MIN_SCOPE_TIMEOUT, min(2.0, remaining)),
+    )
+    others = other_readable_datasets(rows, active, active_ids)
+    if not others:
+        return ""
+    hook_log("recall_dataset_hint", {"active": active, "offered": len(others)})
+    return _format_dataset_hint(active, others)
 
 
 def _load_session_id() -> str:
@@ -355,6 +411,7 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     scope_timeouts = 0
     server_down = False
     auth_rejected = False  # 401/403: the server answered and rejected OUR key
+    payment_refused = False  # 402: the tenant cannot pay for this recall
     server_errors = 0  # 5xx answers: reachable but failing
 
     # Below the floor a call cannot return anything useful, so nothing is
@@ -451,6 +508,8 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             scopes_answered_err += 1
             if exc.code in (401, 403):
                 auth_rejected = True
+            elif exc.code == 402:
+                payment_refused = True
             elif exc.code >= 500:
                 server_errors += 1
         elif verdict == SLOW:
@@ -461,6 +520,15 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             "recall_error",
             {"scope": scope_list, "error": str(exc)[:200], "verdict": verdict},
         )
+    # Status-line credits: a 402 is the server refusing to pay for THIS recall,
+    # the one positive exhaustion signal the plugin sees. Note it on the
+    # tenant's marker entry; a recall that got through clears the note. Both
+    # are best-effort and never raise.
+    if payment_refused:
+        record_payment_required("recall")
+    elif scopes_ok:
+        clear_payment_required()
+
     # The scopes were all in flight together, so there is nothing left to cut
     # short; these mark the prompt-level verdict for the health accounting.
     if server_down:
@@ -571,6 +639,26 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     total = sum(counts.values())
     cross_session_hits = _count_cross_session_hits(by_source, session_id)
 
+    # Name the other datasets the user could search instead (see
+    # _other_datasets_hint) — on every prompt the server answered, since only
+    # the model can tell whether the recalled context answers the user. Not
+    # when nothing answered: the search it recommends would fail the same way.
+    # Decoration on the recall path — it must never break the hook output.
+    dataset_hint = ""
+    if scopes_ok and _dataset_hint_enabled():
+        try:
+            dataset_hint = _other_datasets_hint(
+                session_dataset,
+                read_ids or ([write_id] if write_id else []),
+                service_url,
+                budget_deadline,
+            )
+        except Exception as exc:
+            hook_log(
+                "recall_error",
+                {"scope": ["dataset_hint"], "error": str(exc)[:200], "verdict": "unknown"},
+            )
+
     # Write last-turn counts so the status line script can render them.
     # Best-effort; failure here must not break the hook output.
     try:
@@ -678,6 +766,8 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             f"{header}\n\nRelevant context from this session's memory:\n\n"
             + "\n".join(section_lines).strip()
         )
+        if dataset_hint:
+            full_context += f"\n\n{dataset_hint}"
         hook_log(
             "context_lookup_hit",
             {
@@ -691,6 +781,8 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
         notify(f"injected context ({counts}); saves last turn {saves_last_turn}")
     else:
         full_context = f"{header}\n\n(no memory matches for this prompt)"
+        if dataset_hint:
+            full_context += f"\n\n{dataset_hint}"
         hook_log(
             "context_lookup_empty",
             {

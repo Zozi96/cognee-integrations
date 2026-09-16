@@ -31,7 +31,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from utils.recall import SCOPES, assert_valid_per_scope, drive_recall
+from utils.recall import SCOPES, assert_valid_per_scope, drive_recall, load_lookup
 
 
 @pytest.fixture
@@ -122,27 +122,40 @@ def test_every_scope_gets_the_whole_budget_as_its_deadline(lookup, monkeypatch):
     assert not run.fired("recall_budget_exceeded"), run.events
 
 
-def test_scopes_run_concurrently_so_the_prompt_waits_for_the_slowest(lookup, monkeypatch):
-    """Two slow scopes (0.45s + 0.3s) must cost ~0.45s, not 0.75s.
+def test_scopes_run_concurrently_so_the_prompt_waits_for_the_slowest(
+    suite, hook_module, monkeypatch
+):
+    """Two slow scopes (0.45s + 0.3s) must overlap, not run back to back.
 
     Sequential dispatch made every cheap scope a full round trip on top of the
     graph search. Concurrent dispatch is the point of the fan-out, so it is
-    pinned by wall time: well under the sum, and every scope still dispatched
-    and reported with its own elapsed time.
+    pinned by the scopes' own clocks: the second sleep starts before the first
+    ends. Wall time is not the yardstick — on a loaded CI runner (Windows most
+    of all) thread start-up and the hook's own bookkeeping around the fan-out
+    add hundreds of milliseconds and made a wall-clock bound flaky. The codex
+    core also renders its status line inside ``_run``; ``load_lookup`` holds
+    that inert so only the fan-out is under test.
     """
+    lookup = load_lookup(suite, hook_module, monkeypatch)
     sleeps = {"session": 0.45, "trace": 0.3}
+    windows: dict[str, tuple[float, float]] = {}
 
     def slow_recall(_prompt, **kw):
-        time.sleep(sleeps.get(kw["scope"][0], 0))
+        scope = kw["scope"][0]
+        started = time.monotonic()
+        time.sleep(sleeps.get(scope, 0))
+        windows[scope] = (started, time.monotonic())
         return []
 
     monkeypatch.setenv("COGNEE_RECALL_BUDGET", "5")
-    started = time.monotonic()
     run = drive_recall(lookup, monkeypatch, recall=slow_recall)
-    wall = time.monotonic() - started
 
     assert set(run.calls) == set(SCOPES), run.calls
-    assert wall < 0.65, f"scopes ran back to back: {wall:.2f}s for 0.45s + 0.3s of sleeps"
+    session_start, session_end = windows["session"]
+    trace_start, trace_end = windows["trace"]
+    assert max(session_start, trace_start) < min(session_end, trace_end), (
+        f"scopes ran back to back: session {windows['session']}, trace {windows['trace']}"
+    )
 
     per_scope = run.detail("context_lookup_empty")["per_scope"]
     assert_valid_per_scope(per_scope)

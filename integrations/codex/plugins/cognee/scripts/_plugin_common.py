@@ -516,22 +516,28 @@ def dataset_id_for(dataset: str, host_key: str = "") -> str:
     return ""
 
 
-def shell_runtime_overrides(service_url: str = "") -> dict:
-    """Launch-record state for the shell skills (cognee-search.sh / cognee-remember.sh).
+def shell_runtime_overrides(service_url: str = "", host_key: str = "") -> dict:
+    """Launch-record state for the shell skills (cognee-search.sh / cognee-remember.sh)
+    and ``list-datasets.py``.
 
     Those run under the host's shell tool with no hook payload, so they find
-    their launch record via ``resolve_host_key_outside_hook``. Returns the
-    record's ``session_id`` / ``dataset`` (both empty when unrecorded), the
-    dataset's canonical ``dataset_id`` and comma-joined ``dataset_ids``, and
-    ``api_key`` — the provisioned plugin-agent key when one is cached, so the
-    skills act as the same identity as the hooks (see ``_api_key_with_source``).
-    Kept to one call on purpose: the skills embed Python in a ``$( <<'PY' )``
-    block that macOS's bash 3.2 mis-parses once it grows past a few lines.
+    their launch record via ``resolve_host_key_outside_hook`` — or use the
+    ``host_key`` handed in (``--session-key``) when several launches share a
+    directory. Returns that ``host_key``, the record's ``session_id`` /
+    ``dataset`` (both empty when unrecorded), the dataset's canonical
+    ``dataset_id`` and comma-joined ``dataset_ids``, and ``api_key`` — the
+    provisioned plugin-agent key when one is cached, so the skills act as the
+    same identity as the hooks (see ``_api_key_with_source``). Kept to one call
+    on purpose: the skills embed Python in a ``$( <<'PY' )`` block that macOS's
+    bash 3.2 mis-parses once it grows past a few lines.
     """
-    host_key, _ = resolve_host_key_outside_hook()
+    host_key = _sanitize_session_key(host_key)
+    if not host_key:
+        host_key, _ = resolve_host_key_outside_hook()
     rec = _read_map_record(host_key) if host_key else {}
     write_id, read_ids = resolve_active_dataset_ids(host_key) if host_key else ("", [])
     return {
+        "host_key": host_key,
         "session_id": str(rec.get("session_id") or "").strip(),
         "dataset": str(rec.get("dataset") or "").strip(),
         "dataset_id": write_id,
@@ -788,6 +794,31 @@ def _candidate_host_pids() -> set[int]:
     return pids
 
 
+def list_readable_datasets(*, timeout: float = 15.0) -> list[dict]:
+    """Every dataset this key can READ: ``[{"name", "id", "owner_id"}]``, by name.
+
+    ``GET /api/v1/datasets/`` already answers with the caller's read set —
+    owned, granted directly, or shared through a role — so no permission is
+    checked here. This is the cross-dataset search picker's list (a read-only
+    dataset is searchable); ``list_writable_datasets`` narrows it to switch
+    targets by judging write access on top.
+    """
+    raw = _json_http_request("/api/v1/datasets/", method="GET", timeout=timeout)
+    rows = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "name": str(item.get("name") or ""),
+                "id": str(item.get("id") or ""),
+                "owner_id": str(item.get("owner_id") or item.get("ownerId") or ""),
+            }
+        )
+    rows.sort(key=lambda row: (row["name"].lower(), row["id"]))
+    return rows
+
+
 def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
     """Use effective permissions. Ownership cannot prove absence of write access.
 
@@ -803,8 +834,7 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
          "readonly": [names], "readonly_ids": [ids], "hidden_readonly": N,
          "filtered": bool}
     """
-    raw = _json_http_request("/api/v1/datasets/", method="GET", timeout=timeout)
-    items = raw if isinstance(raw, list) else []
+    items = list_readable_datasets(timeout=timeout)
     if not user_id:
         me = _json_http_request("/api/v1/users/me", method="GET", timeout=timeout)
         user_id = str(me.get("id") or "") if isinstance(me, dict) else ""
@@ -830,8 +860,8 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
         role_granted = shared.get("granted") if isinstance(shared.get("granted"), dict) else {}
     rows = []
     for item in items:
-        owner = str(item.get("owner_id") or item.get("ownerId") or "")
-        ident = str(item.get("id") or "")
+        owner = item["owner_id"]
+        ident = item["id"]
         # Writable through the shared role only once the grant is confirmed —
         # a transient failure leaves a parent-owned dataset ungranted until the
         # next refresh, and it must not be offered as writable meanwhile.
@@ -842,15 +872,7 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
             writable = ident in writable_ids or via_role
         else:
             writable = True if owner and (owner == user_id or via_role) else None
-        rows.append(
-            {
-                "name": str(item.get("name") or ""),
-                "id": ident,
-                "owner_id": owner,
-                "writable": writable,
-            }
-        )
-    rows.sort(key=lambda row: (row["name"].lower(), row["id"]))
+        rows.append({**item, "writable": writable})
     return {
         "datasets": [row for row in rows if row["writable"] is not False],
         "readonly": [row["name"] for row in rows if row["writable"] is False],
@@ -858,6 +880,102 @@ def list_writable_datasets(user_id: str = "", *, timeout: float = 15.0) -> dict:
         "hidden_readonly": sum(row["writable"] is False for row in rows),
         "filtered": writable_ids is not None,
     }
+
+
+# ── readable-datasets cache (cross-dataset search hint) ─────────────────────
+# The prompt hook offers the other readable datasets when the active one's
+# graph returns nothing. It runs on the keystroke->answer path, so the listing
+# comes from this per-plugin cache and is refreshed over the network only when
+# stale, inside what is left of the recall budget.
+
+_READABLE_DATASETS_CACHE = _PLUGIN_DIR / "readable-datasets.json"
+_READABLE_DATASETS_TTL_DEFAULT = 300.0
+
+
+def cross_dataset_search_command() -> str:
+    """The one-off graph search on another dataset, as the hint and the lister
+    spell it for the model: ``cognee-search.sh "<query>" 10 --graph --dataset-id <id>``."""
+    script = Path(__file__).resolve().parent / "cognee-search.sh"
+    return f'{script} "<query>" 10 --graph --dataset-id <id>'
+
+
+def _readable_datasets_cache_key(service_url: str, api_key: str) -> str:
+    """Server URL + key fingerprint: a listing fetched for another server or
+    identity is never served (the read set is per principal)."""
+    base = _normalize_service_url(service_url) or str(service_url or "").rstrip("/")
+    return hashlib.sha256((base + "\n" + str(api_key or "")).encode("utf-8")).hexdigest()
+
+
+def cached_readable_datasets(
+    *,
+    service_url: str = "",
+    max_age: float | None = None,
+    refresh: bool = True,
+    timeout: float = 2.0,
+) -> list[dict]:
+    """The readable-datasets rows from the cache, refreshed when stale.
+
+    A listing younger than ``max_age`` seconds (``COGNEE_DATASETS_CACHE_TTL``,
+    default 300) is served as-is. Otherwise, when ``refresh`` is allowed, one
+    bounded ``list_readable_datasets`` call rewrites the cache; a refresh that
+    fails falls back to the stale rows rather than to nothing. Never raises:
+    the hint is decoration on the recall path.
+    """
+    service_url = service_url or _local_api_url()
+    key = _readable_datasets_cache_key(service_url, _api_key())
+    if max_age is None:
+        max_age = _float_env("COGNEE_DATASETS_CACHE_TTL", _READABLE_DATASETS_TTL_DEFAULT)
+    cached = _load_json_file(_READABLE_DATASETS_CACHE)
+    rows = cached.get("datasets") if isinstance(cached, dict) else None
+    same_identity = isinstance(cached, dict) and str(cached.get("key") or "") == key
+    if not (same_identity and isinstance(rows, list)):
+        rows = None
+    if rows is not None:
+        try:
+            age = time.time() - float(cached.get("fetched_at") or 0)
+        except (TypeError, ValueError):
+            age = float("inf")
+        if 0 <= age <= max_age:
+            return rows
+    if not refresh:
+        return rows or []
+    try:
+        fresh = list_readable_datasets(timeout=timeout)
+    except Exception as exc:
+        hook_log("readable_datasets_refresh_failed", {"error": str(exc)[:200]})
+        return rows or []
+    _write_json_file(
+        _READABLE_DATASETS_CACHE,
+        {"key": key, "fetched_at": time.time(), "datasets": fresh},
+    )
+    return fresh
+
+
+def other_readable_datasets(rows: list, active_dataset: str = "", active_ids=()) -> list[dict]:
+    """``rows`` minus the launch's active dataset, in listing order, unique by id.
+
+    The active dataset is excluded by every handle it goes by: its canonical
+    UUID and the same-named copies graph recall already spans (``active_ids``,
+    the launch record's ``dataset_ids`` under shared memory), and — when the
+    launch is name-addressed and has no ids — its name.
+    """
+    ids = {str(x).strip() for x in (active_ids or ()) if str(x).strip()}
+    if parse_dataset_id(active_dataset):
+        ids.add(parse_dataset_id(active_dataset))
+    name = str(active_dataset or "").strip()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ident = str(row.get("id") or "")
+        if not ident or ident in seen or ident in ids:
+            continue
+        if not ids and name and str(row.get("name") or "") == name:
+            continue
+        seen.add(ident)
+        out.append(row)
+    return out
 
 
 def resolve_conn_uuid(host_key: str = "") -> str:
@@ -3365,6 +3483,22 @@ _CREDITS_MARKER = _PLUGIN_DIR / "credits.json"
 _PLATFORM_API_URL_DEFAULT = "https://api.aws.cognee.ai"
 
 
+def _platform_host_for(service_url: str) -> str:
+    """``api.<env>`` for a ``tenant-<id>.<env>`` data-plane host, else "".
+
+    The cloud names its hosts by role under one environment suffix: the memory
+    data plane is ``tenant-<id>.<env>`` and the platform (billing, account) is
+    ``api.<env>``. Deriving one from the other keeps a dev tenant talking to
+    the dev platform — asking production for a dev tenant's balance 401s, and
+    the status line then never showed a number at all.
+    """
+    host = (urllib.parse.urlparse(str(service_url or "").strip()).hostname or "").lower()
+    label, _, rest = host.partition(".")
+    if not rest or not label.startswith("tenant-") or len(label) <= len("tenant-"):
+        return ""
+    return f"api.{rest}"
+
+
 def _platform_api_url() -> str:
     """The cloud control-plane API host (billing/account routes).
 
@@ -3372,13 +3506,15 @@ def _platform_api_url() -> str:
     host (``tenant-<id>.aws.cognee.ai``), which serves recall/remember/improve
     but has NO billing routes — asking it for the credits overview 404s. The
     billing routes live only on the platform API, which accepts the same
-    tenant ``COGNEE_API_KEY``. Overridable for other cloud deployments.
+    tenant ``COGNEE_API_KEY``. Derived from the configured service URL
+    (``api.<env>`` beside ``tenant-<id>.<env>``); ``COGNEE_PLATFORM_API_URL``
+    overrides, and a non-tenant URL falls back to the production platform.
     """
-    return (
-        str(os.environ.get("COGNEE_PLATFORM_API_URL", "") or _PLATFORM_API_URL_DEFAULT)
-        .strip()
-        .rstrip("/")
-    )
+    override = str(os.environ.get("COGNEE_PLATFORM_API_URL", "") or "").strip()
+    if override:
+        return override.rstrip("/")
+    host = _platform_host_for(_local_api_url())
+    return f"https://{host}" if host else _PLATFORM_API_URL_DEFAULT
 
 
 # The marker is a MAP keyed by tenant id: several concurrent Claude sessions
@@ -3411,6 +3547,144 @@ def _credits_entry_for_url(marker: dict, service_url: str) -> tuple[str, dict]:
         ):
             return str(key), entry
     return "", {}
+
+
+# --- "Not enough credits" (HTTP 402) ------------------------------------------
+# A 402 from a billable route (recall / remember / improve / entry save) is the
+# server saying "this tenant cannot pay for THIS request" — the only positive
+# exhaustion signal the plugin ever sees, and the only one that works when the
+# billing overview itself cannot be fetched (a dev tenant asking the wrong
+# platform host, an expired key). It is recorded on the tenant's marker entry
+# next to the balance, and cleared by the next billable operation that
+# succeeds. The status line renders it as "(not enough for <op>)" beside the
+# balance, or as the whole segment when no balance reading exists.
+_CREDITS_URL_KEY_PREFIX = "url:"
+
+
+def _placeholder_credits_key(service_url: str) -> str:
+    """Marker key for a 402 seen before any tenant-bound balance entry exists.
+
+    The recall hook has no tenant id (``load_resolved(identity=False)``), and a
+    dev tenant never gets a balance entry because its billing fetch fails, so
+    the note needs a home keyed by the service URL. ``refresh_credits`` folds
+    it into the real tenant entry the moment one is written.
+    """
+    return _CREDITS_URL_KEY_PREFIX + _normalize_service_url(service_url)
+
+
+def _write_credits_marker(marker: dict) -> None:
+    """Atomically replace the credits marker. Caller holds the credits lock."""
+    _CREDITS_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    # Per-pid tmp: a shared staging name let one writer truncate the file
+    # another was about to os.replace into place, and the renderer briefly saw
+    # a torn marker (the "credits disappear mid-search" flicker).
+    tmp = _CREDITS_MARKER.with_name(f"{_CREDITS_MARKER.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(marker), encoding="utf-8")
+        os.replace(tmp, _CREDITS_MARKER)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _credits_entry_last_seen(entry: dict) -> float:
+    """The newest timestamp on an entry: balance reading or 402 note."""
+    stamps = [entry.get("checked_at", 0)]
+    note = entry.get("payment_required")
+    if isinstance(note, dict):
+        stamps.append(note.get("at", 0))
+    best = 0.0
+    for stamp in stamps:
+        try:
+            best = max(best, float(stamp or 0))
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
+def _locate_credits_entry(marker: dict, service_url: str, tenant_id: str = "") -> str:
+    """The marker key for this session's tenant: explicit id, URL binding, or
+    the URL placeholder (which may not exist yet)."""
+    key = str(tenant_id or "").strip()
+    if key:
+        return key
+    key, _ = _credits_entry_for_url(marker, service_url)
+    return key or _placeholder_credits_key(service_url)
+
+
+def record_payment_required(op_label: str, *, tenant_id: str = "") -> None:
+    """Note that ``op_label`` was refused with HTTP 402 on this tenant.
+
+    Best-effort and never raises: the caller is a hook on the keystroke->answer
+    path or a background sync, and a marker problem must not become theirs.
+    No-op on a local server (no credits concept).
+    """
+    service_url = _local_api_url()
+    if service_url_is_local(service_url):
+        return
+    op = str(op_label or "operation").strip()[:24] or "operation"
+    try:
+        acquired = _try_acquire_credits_lock()
+        try:
+            marker = read_credits_marker()
+            key = _locate_credits_entry(marker, service_url, tenant_id)
+            entry = marker.get(key)
+            entry = dict(entry) if isinstance(entry, dict) else {}
+            entry.setdefault("base_url", service_url)
+            entry["payment_required"] = {
+                "op": op,
+                "at": datetime.now(timezone.utc).timestamp(),
+            }
+            marker[key] = entry
+            _write_credits_marker(marker)
+        finally:
+            if acquired:
+                _release_credits_lock()
+        hook_log("credits_payment_required", {"op": op, "base_url": service_url})
+    except Exception as exc:
+        hook_log("credits_marker_write_failed", {"error": str(exc)[:200], "op": op})
+
+
+def clear_payment_required(*, tenant_id: str = "") -> None:
+    """Drop the 402 note once a billable operation on this tenant succeeded.
+
+    Cheap when there is nothing to clear (one small read, no lock, no write),
+    which is the steady state on every prompt. Never raises; no-op locally.
+    """
+    service_url = _local_api_url()
+    if service_url_is_local(service_url):
+        return
+    try:
+        marker = read_credits_marker()
+        key = _locate_credits_entry(marker, service_url, tenant_id)
+        entry = marker.get(key)
+        if not isinstance(entry, dict) or "payment_required" not in entry:
+            return
+        acquired = _try_acquire_credits_lock()
+        try:
+            marker = read_credits_marker()
+            entry = marker.get(key)
+            if not isinstance(entry, dict):
+                return
+            entry = dict(entry)
+            note = entry.pop("payment_required", None)
+            if key.startswith(_CREDITS_URL_KEY_PREFIX) and "remaining_usd" not in entry:
+                # A placeholder held nothing but the note: remove it outright.
+                marker.pop(key, None)
+            else:
+                marker[key] = entry
+            _write_credits_marker(marker)
+        finally:
+            if acquired:
+                _release_credits_lock()
+        hook_log(
+            "credits_payment_cleared",
+            {"op": (note or {}).get("op") if isinstance(note, dict) else None},
+        )
+    except Exception as exc:
+        hook_log("credits_marker_write_failed", {"error": str(exc)[:200], "op": "clear"})
 
 
 def _try_acquire_credits_lock() -> bool:
@@ -3546,6 +3820,15 @@ def refresh_credits(op_label: str = "", *, tenant_id: str = "", timeout: float =
             prior = marker.get(entry_key)
             prior = prior if isinstance(prior, dict) else {}
             last_op = prior.get("last_op")
+            # A 402 note outlives the balance refresh: a small positive balance
+            # can still be "not enough", and only a SUCCESSFUL operation knows
+            # otherwise. Adopt a note parked on the URL placeholder too — the
+            # recall hook records without a tenant id, and this is the first
+            # tenant-bound entry for the URL.
+            placeholder = marker.get(_placeholder_credits_key(service_url))
+            payment_required = prior.get("payment_required")
+            if not isinstance(payment_required, dict) and isinstance(placeholder, dict):
+                payment_required = placeholder.get("payment_required")
             if op_label:
                 delta = None
                 try:
@@ -3565,7 +3848,10 @@ def refresh_credits(op_label: str = "", *, tenant_id: str = "", timeout: float =
                     }
             if isinstance(last_op, dict):
                 entry["last_op"] = last_op
+            if isinstance(payment_required, dict):
+                entry["payment_required"] = payment_required
             marker[entry_key] = entry
+            marker.pop(_placeholder_credits_key(service_url), None)
             # Prune long-dead tenants so one-off connections don't accumulate.
             for key in [
                 k
@@ -3573,24 +3859,11 @@ def refresh_credits(op_label: str = "", *, tenant_id: str = "", timeout: float =
                 if k != entry_key
                 and (
                     not isinstance(v, dict)
-                    or now_ts - float(v.get("checked_at", 0) or 0) > _CREDITS_ENTRY_MAX_AGE_SECONDS
+                    or now_ts - _credits_entry_last_seen(v) > _CREDITS_ENTRY_MAX_AGE_SECONDS
                 )
             ]:
                 marker.pop(key, None)
-            _CREDITS_MARKER.parent.mkdir(parents=True, exist_ok=True)
-            # Per-pid tmp: a shared staging name let one writer truncate the
-            # file another was about to os.replace into place, and the
-            # renderer briefly saw a torn marker (the "credits disappear
-            # mid-search" flicker).
-            tmp = _CREDITS_MARKER.with_name(f"{_CREDITS_MARKER.name}.{os.getpid()}.tmp")
-            try:
-                tmp.write_text(json.dumps(marker), encoding="utf-8")
-                os.replace(tmp, _CREDITS_MARKER)
-            finally:
-                try:
-                    tmp.unlink()
-                except FileNotFoundError:
-                    pass
+            _write_credits_marker(marker)
         finally:
             if acquired:
                 _release_credits_lock()
@@ -4599,6 +4872,8 @@ def drain_warmup_entries(
                 drained += 1
             except urllib.error.HTTPError as exc:
                 http_failure = True
+                if exc.code == 402:
+                    record_payment_required("save")
                 hook_log(
                     "warmup_drain_error",
                     {"error": str(exc)[:200], "drained": drained, "status": exc.code},
@@ -4841,6 +5116,10 @@ def run_session_improve_detailed(dataset: str, session_id: str, *, trigger: str 
             reason = "failed"
     ok = bool(result.get("ok"))
     error = str(result.get("error") or "")
+    if result.get("status") == 402:
+        record_payment_required("improve")
+    elif ok:
+        clear_payment_required()
     hook_log(
         "improve_fired",
         {

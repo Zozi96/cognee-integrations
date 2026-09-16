@@ -10,6 +10,73 @@ is the cache key and semver record, bumped on each release, not the update trigg
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.6]
+
+### Added
+- **The status bar says when credits are not enough, and where to top up.** Until now a
+  cloud tenant that ran out of credits saw nothing: every recall, save and improve came
+  back `HTTP 402 Payment Required`, the plugin logged it as a generic `recall_error` and
+  moved on, and the credits segment kept showing the last balance it had read — or
+  nothing at all on a tenant whose billing overview could not be fetched. Now a 402 from
+  any billable route (recall, trace/answer save, `/remember`, improve) is recorded on the
+  tenant's credits marker as `payment_required: {op, at}`, and the segment renders it:
+  - balance above a dollar but refused: `credits: $2.04 (not enough for recall)`;
+  - a dollar or less left: `credits: $0.61 · top up: https://platform.cognee.ai/billing` —
+    the cloud refuses requests before the balance reaches zero, so the threshold is a
+    dollar, not zero;
+  - refused with no balance reading at all (the platform fetch itself failed): `credits: not enough for recall`, with the top-up link.
+
+  The top-up link is the production billing page; staging and dev sessions set
+  `COGNEE_BILLING_URL` (the web frontend's host is not derivable from the tenant host).
+  The platform API host the balance is fetched from IS derived from the service URL:
+  beside a `tenant-<id>.<env>.cognee.ai` data plane it is `api.<env>.cognee.ai`, so a dev
+  tenant asks the dev platform instead of production (which answered `401` and left the
+  segment blank). A non-tenant URL falls back to the production platform;
+  `COGNEE_PLATFORM_API_URL` overrides.
+
+  The next billable operation that succeeds clears the note, so a top-up shows through
+  on the following prompt. The note is written under the same per-tenant lock as the
+  balance and survives the balance refresh: a small positive balance can still be "not
+  enough", and only a successful operation knows otherwise. New events:
+  `credits_payment_required`, `credits_payment_cleared`, `credits_marker_write_failed`.
+- **Search another dataset without switching.** Recall reads only the active dataset,
+  so information living in another dataset was invisible unless the user switched —
+  a full switch (sync, new Cognee session, repointed launch record) just to look
+  something up. Now, on every prompt the server answers, the recall hook appends an
+  `Other Cognee datasets you can search` block to the injected context: every other
+  dataset the identity can read (read-only ones included), with UUIDs, plus the
+  command to search one. It rides along on hits too: graph retrieval is
+  nearest-neighbour and returns something from any populated dataset, so "zero
+  hits" never happens and only the model can tell whether the recalled context
+  answers the user. If the user is recalling something the active dataset did not
+  have, Codex offers those datasets as a numbered list; the chosen one gets a one-off
+  **graph-only** search and the answer names its source dataset. The active dataset,
+  session and write target are untouched. The same flow is spelled out in the
+  `memory` skill for when an explicit search comes back empty.
+  - `scripts/list-datasets.py [--others]` lists every readable dataset (JSON) with
+    the active one marked (`switch-dataset.py --list` still shows only switch
+    targets). `list_readable_datasets` is the shared listing both build on.
+  - `cognee-search.sh --dataset-id <uuid>` addresses a dataset by UUID (a name only
+    resolves among owned datasets). Any dataset other than the active one is forced
+    to graph scope with the session id dropped — session history is bound to the
+    active dataset — with a note on stderr; the active dataset named by hand keeps
+    the full scope.
+  - The hint's listing comes from a per-plugin cache
+    (`~/.cognee-plugin/codex/readable-datasets.json`, keyed by server and identity)
+    refreshed at most every `COGNEE_DATASETS_CACHE_TTL` seconds (default 300) and
+    only inside what remains of the recall budget, so the prompt path never waits on
+    it. `COGNEE_RECALL_DATASET_HINT=off` disables the hint. Every other readable
+    dataset is named — nothing ranks them, so the user chooses.
+  - New hook events: `recall.dataset_hint`, `datasets.readable_refresh_failed`,
+    `datasets.list_failed`.
+
+### Removed
+- **The `· switched` status-line tag.** After `/cognee-switch-datasets` the bar appended
+  a faint `· switched` after the mode. The dataset name beside it already says which
+  dataset the session is on, so the tag added nothing, cluttered the line, and read
+  as a state that wanted acting on. Gone; the launch record still carries
+  `switched_at` for the hooks.
+
 ## [1.6.5]
 
 ### Fixed

@@ -86,6 +86,9 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:context_lookup_session_key` | `recall.lookup_session_key` |
 | `hook:credits_fetch_empty` | `credits.fetch_empty` |
 | `hook:credits_fetch_failed` | `credits.fetch_failed` |
+| `hook:credits_marker_write_failed` | `credits.marker_write_failed` |
+| `hook:credits_payment_cleared` | `credits.payment_cleared` |
+| `hook:credits_payment_required` | `credits.payment_required` |
 | `hook:credits_refresh_error` | `credits.refresh_error` |
 | `hook:credits_refresh_skipped_no_tenant` | `credits.refresh_skipped_no_tenant` |
 | `hook:credits_tenant_not_in_overview` | `credits.tenant_not_in_overview` |
