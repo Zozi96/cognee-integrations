@@ -30,7 +30,7 @@ Knowledge is organized into three categories via `node_set`:
   machine holding a cognee **source checkout**, and in cloud mode the plugin's
   venv is never built at all. Use it only when the server is genuinely
   unreachable *and* that checkout exists. Unsure which mode you are in?
-  `${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh --json` reports `mode`,
+  `"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh" --json` reports `mode`,
   `server_url` and `reachable` without importing cognee.
 - **Empty CLI output is never proof of absence.** Ground-truth against the server
   before concluding anything.
@@ -45,16 +45,16 @@ Use the wrapper below: it queries the server, scoped to the **plugin's dataset**
 
 ```bash
 # session cache + permanent graph (default)
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS"
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS"
 
 # permanent graph only
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS" 10 --graph
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10 --graph
 
 # current session only
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS" 10 --session
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10 --session
 
 # deterministic code graph (indexed repos only — see the cognee-code skill)
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "MyClass" 10 --code
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "MyClass" 10 --code
 ```
 
 **Structural code questions belong to `--code`, not here.** "What calls X",
@@ -70,7 +70,7 @@ Categories (`user_context` / `project_docs` / `agent_actions`) filter by node se
 **Resolve credentials first.** In local mode `$COGNEE_API_KEY` is empty (the key is minted into `~/.cognee-plugin/api_key.json` and never exported to your shell), so a hand-rolled `curl` with `-H "X-Api-Key: ${COGNEE_API_KEY:-}"` 401s and looks like a server fault when nothing is wrong. Use the forget helper's resolver in the **same** shell invocation — exports do not persist across separate Bash calls:
 
 ```bash
-eval "$(${CLAUDE_PLUGIN_ROOT}/scripts/cognee-forget.sh env)" && \
+eval "$("${CLAUDE_PLUGIN_ROOT}/scripts/cognee-forget.sh" env)" && \
 curl -s -X POST "${COGNEE_BASE_URL}/api/v1/recall" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: ${COGNEE_API_KEY}" \
@@ -82,7 +82,7 @@ curl -s -X POST "${COGNEE_BASE_URL}/api/v1/recall" \
 The server is authoritative. If a search returns empty but you expect content, confirm directly — **do not** conclude "not found" from empty CLI output. Resolve credentials in the same invocation, as above:
 
 ```bash
-eval "$(${CLAUDE_PLUGIN_ROOT}/scripts/cognee-forget.sh env)" && \
+eval "$("${CLAUDE_PLUGIN_ROOT}/scripts/cognee-forget.sh" env)" && \
 curl -s -X POST "${COGNEE_BASE_URL}/api/v1/recall" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: ${COGNEE_API_KEY}" \
@@ -100,7 +100,7 @@ cognee-cli recall "$ARGUMENTS" -k 5 -f json
 ```
 
 If the CLI is missing, say the server is unreachable and show the user
-`${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh` output instead.
+`"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh"` output instead.
 
 ## Not found in the active dataset? Offer another one
 
@@ -114,7 +114,7 @@ switch retires the session. Offer a one-off search instead:
    excluded; read-only datasets are searchable and included):
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py --others
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py" --others
    ```
 
    The JSON has `current` (`{name, id, ids}`) and `datasets`
@@ -132,7 +132,7 @@ switch retires the session. Offer a one-off search instead:
    which dataset the results came from:
 
    ```bash
-   ${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS" 10 --graph --dataset-id <id>
+   "${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10 --graph --dataset-id <id>
    ```
 
    The wrapper forces graph scope and drops the session id for any dataset

@@ -404,7 +404,10 @@ def test_listing_marks_the_active_dataset(lister):
         ("project-alpha", False),
         ("team-notes", False),
     ]
-    assert out["search"].endswith('cognee-search.sh "<query>" 10 --graph --dataset-id <id>')
+    # The script path is quoted so a plugin root containing a space survives the
+    # shell the model runs this in (topoteretes/cognee#5154).
+    assert out["search"].endswith('cognee-search.sh" "<query>" 10 --graph --dataset-id <id>')
+    assert out["search"].startswith('"')
 
 
 def test_listing_others_drops_the_active_dataset(lister):
