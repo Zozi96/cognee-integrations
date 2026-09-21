@@ -896,7 +896,10 @@ def cross_dataset_search_command() -> str:
     """The one-off graph search on another dataset, as the hint and the lister
     spell it for the model: ``cognee-search.sh "<query>" 10 --graph --dataset-id <id>``."""
     script = Path(__file__).resolve().parent / "cognee-search.sh"
-    return f'{script} "<query>" 10 --graph --dataset-id <id>'
+    # Quoted: the plugin root follows the host's config home, and the managed
+    # defaults contain a space (topoteretes/cognee#5154), so a bare path would
+    # hand the model a command that word-splits.
+    return f'"{script}" "<query>" 10 --graph --dataset-id <id>'
 
 
 def _readable_datasets_cache_key(service_url: str, api_key: str) -> str:

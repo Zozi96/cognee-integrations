@@ -15,7 +15,7 @@ Store data permanently in the Cognee knowledge graph with category tagging.
   machine holding a cognee **source checkout**, and in cloud mode the plugin's
   venv is never built at all. Use it only when the server is genuinely
   unreachable *and* that checkout exists. Unsure which mode you are in?
-  `${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh --json` reports `mode`,
+  `"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh" --json` reports `mode`,
   `server_url` and `reachable` without importing cognee.
 - **Empty CLI output is never proof that a write landed.** Confirm against the
   server before reporting success.
@@ -36,17 +36,17 @@ Determine the category from the user's intent, then run:
 
 **User data** (preferences, corrections, personal context):
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh "$ARGUMENTS" --node-set user_context
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh" "$ARGUMENTS" --node-set user_context
 ```
 
 **Project data** (docs, code, company knowledge):
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh "$ARGUMENTS" --node-set project_docs
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh" "$ARGUMENTS" --node-set project_docs
 ```
 
 **Agent data** (explicit agent notes — routine tool logs are automatic):
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh "$ARGUMENTS" --node-set agent_actions
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh" "$ARGUMENTS" --node-set agent_actions
 ```
 
 **Storing a file (code included)**: pass `--file` so the upload keeps its real
@@ -55,7 +55,7 @@ filename — the extension is the server's routing signal, and a code file
 ingested as prose:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh --file src/payments.py --node-set project_docs
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-remember.sh" --file src/payments.py --node-set project_docs
 ```
 
 For a whole repository (cross-file calls/imports, impact analysis), index it
@@ -81,7 +81,7 @@ cognee-cli remember "$ARGUMENTS" -d "${COGNEE_PLUGIN_DATASET:-agent_sessions}" -
 **Empty or clean CLI output does NOT confirm the data was stored.** Verify via the server directly once it is back up.
 
 If the CLI is missing too, say the write could not be persisted and show the user
-`${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh` output — do not report the
+`"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-doctor.sh"` output — do not report the
 memory as saved.
 
 ## When to use
