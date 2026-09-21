@@ -86,10 +86,14 @@ integrations:
       Talks to a cognee server over the REST API (as claude-code/codex/openclaw do);
       still needs the cognee package installed, both to spawn the local server and
       for the opt-in in-process mode (COGNEE_EMBEDDED=true, COGNEE_TRANSPORT=sdk).
-      Hermes discovers memory providers by directory scan only, so the wheel ships
-      a cognee-hermes-install console script that copies the plugin into
-      $HERMES_HOME/plugins/cognee (re-run after pip install -U). Published to PyPI
-      from CI on hermes-agent-v* tags (hermes-agent-publish.yml).
+      Hermes discovers memory providers through pip entry points and by scanning
+      $HERMES_HOME/plugins, so the wheel ships a cognee-hermes-install console
+      script that copies the plugin into $HERMES_HOME/plugins/cognee for the CLI
+      and dashboard surfaces (re-run after pip install -U). Installs from the
+      Hermes plugin catalog carry a .hermes-catalog.json sidecar; those update
+      with `hermes plugins update cognee` and the console script refuses to
+      overwrite them. Published to PyPI from CI on hermes-agent-v* tags
+      (hermes-agent-publish.yml).
 
   - slug: dify
     name: "Cognee Tool Plugin for Dify"
