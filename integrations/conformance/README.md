@@ -10,19 +10,23 @@ integration runs it through a small sanitizer. The rule is:
 - Cap the length at 120 characters.
 
 `session_id_cases.json` is the single source of truth for that rule. It is a
-list of `{ "input", "expected", "note" }` cases. Each integration has a small
-test that loads this file and checks its own sanitizer against it:
+list of `{ "input", "expected", "note" }` cases. Each test loads this file and
+checks its sanitizer against it. The tests live with the suite that already
+covers the tree they test, so no integration needs a test project of its own:
 
-- claude-code: `integrations/claude-code/tests/test_session_id_conformance.py`
-- codex: `integrations/codex/tests/test_session_id_conformance.py`
+- claude-code and codex:
+  `integrations/tests/tests/unit/test_session_id_conformance.py` — the shared
+  hook-plugin suite, parametrized over both plugin trees.
 - hermes-agent: `integrations/hermes-agent/tests/test_session_id_conformance.py`
-- openclaw: `integrations/openclaw/__tests__/test_session_id_conformance.ts`
+- openclaw: `integrations/openclaw/__tests__/unit/test_session_id_conformance.ts`
 
 Because every test reads the same file, any implementation that drifts from the
-rule fails its test. CI runs all four on every pull request: hermes-agent via
-the `test-python` job (it has a `pyproject.toml`), and claude-code, codex and
-openclaw via the dedicated `test-conformance` job in
-`.github/workflows/ci.yml`.
+rule fails its test. CI runs all of them on every pull request through the
+existing jobs in `.github/workflows/ci.yml`: the shared suite via `test-python`
+(`detect-changes` maps a claude-code or codex change onto the `tests` cell) and
+again under Python 3.9 via `test-hooks-python39`, hermes-agent via `test-python`
+(it has its own `pyproject.toml`), and openclaw via `test-typescript`, which
+runs `npm test` as well as the type check.
 
 ## Note on empty results
 
