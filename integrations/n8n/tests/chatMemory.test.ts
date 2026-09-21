@@ -177,14 +177,47 @@ describe('CogneeChatHistory (Chat Memory Manager path)', () => {
 		]);
 	});
 
-	it('holds a lone user message until the assistant reply arrives', async () => {
+	// Regression: the Chat Memory Manager node adds messages one at a time and
+	// never calls addMessages, so anything buffered waiting for a counterpart
+	// was silently dropped when the instance went away.
+	it('writes a lone user message immediately instead of buffering it', async () => {
 		const { calls, request } = fakeRequest();
 		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
-		await history.addMessage({ role: 'user', content: [{ type: 'text', text: 'Q' }] });
-		expect(calls).toHaveLength(0);
-		await history.addMessage({ role: 'assistant', content: [{ type: 'text', text: 'A' }] });
+		await history.addMessage({ role: 'user', content: [{ type: 'text', text: 'remember this' }] });
 		expect(calls).toHaveLength(1);
-		expect((calls[0].body as { entry: { question: string } }).entry.question).toBe('Q');
+		expect((calls[0].body as { entry: unknown }).entry).toEqual({
+			type: 'qa',
+			question: 'remember this',
+			answer: '(no assistant message)',
+			context: '',
+		});
+	});
+
+	it('loses nothing when messages arrive one at a time', async () => {
+		const { calls, request } = fakeRequest();
+		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
+		for (const message of [
+			{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Q' }] },
+			{ role: 'assistant' as const, content: [{ type: 'text' as const, text: 'A' }] },
+			{ role: 'system' as const, content: [{ type: 'text' as const, text: 'be terse' }] },
+		]) {
+			await history.addMessage(message);
+		}
+		const entries = calls.map(
+			(c) => (c.body as { entry: { question: string; answer: string } }).entry,
+		);
+		expect(entries).toEqual([
+			{ type: 'qa', question: 'Q', answer: '(no assistant message)', context: '' },
+			{ type: 'qa', question: '(no user message)', answer: 'A', context: '' },
+			{ type: 'qa', question: '[system]', answer: 'be terse', context: '' },
+		]);
+	});
+
+	it('rejects clear() naming the Chat Memory Manager operations it blocks', async () => {
+		const { calls, request } = fakeRequest();
+		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
+		await expect(history.clear()).rejects.toThrow(/Delete Messages.*Override All Messages/s);
+		expect(calls).toHaveLength(0);
 	});
 });
 

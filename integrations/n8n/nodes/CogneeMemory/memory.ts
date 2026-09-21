@@ -72,7 +72,7 @@ const NO_QUESTION = '(no user message)';
 const NO_ANSWER = '(no assistant message)';
 
 export const CLEAR_UNSUPPORTED_MESSAGE =
-	'Cognee does not expose an endpoint to clear one session yet. Start a new Session ID to begin a fresh conversation, or use the Cognee node (Memory → Forget) to remove the dataset the session was remembered into.';
+	'Cognee Memory cannot clear a session: Cognee has no endpoint that deletes a single session. This affects the Chat Memory Manager operations that wipe memory first — Delete Messages, and Insert Messages with Override All Messages. Use a new Session ID to start a fresh conversation, or the Cognee node (Memory → Forget) to remove the dataset the session was remembered into.';
 
 function textOf(message: Message): string {
 	return message.content
@@ -135,8 +135,6 @@ export interface CogneeMemoryConfig {
  * {@link CogneeChatMemory}.
  */
 export class CogneeChatHistory extends BaseChatHistory {
-	private pendingUser: Message | null = null;
-
 	constructor(
 		private readonly sessionId: string,
 		private readonly datasetName: string,
@@ -156,36 +154,43 @@ export class CogneeChatHistory extends BaseChatHistory {
 	}
 
 	/**
-	 * Cognee stores turns as question/answer pairs, so a lone user message is
-	 * held until the matching assistant message arrives. Anything that cannot
-	 * be paired (two users in a row, a system message, an assistant with no
-	 * question) is stored with a placeholder on the missing side.
+	 * Write one message. Nothing is buffered between calls: n8n's Chat Memory
+	 * Manager adds messages one at a time and then discards this instance, so a
+	 * message held back waiting for its counterpart would be lost silently.
 	 */
 	async addMessage(message: Message): Promise<void> {
-		if (message.role === 'user') {
-			if (this.pendingUser) {
-				await this.storeTurn(textOf(this.pendingUser), NO_ANSWER);
-			}
-			this.pendingUser = message;
-			return;
-		}
-		if (message.role === 'assistant') {
-			const question = this.pendingUser ? textOf(this.pendingUser) : '';
-			this.pendingUser = null;
-			await this.storeTurn(question || NO_QUESTION, textOf(message) || NO_ANSWER);
-			return;
-		}
-		// system / tool messages have no Q&A shape; keep them as context-only rows.
-		await this.storeTurn(`[${message.role}]`, textOf(message) || NO_ANSWER);
+		await this.addMessages([message]);
 	}
 
+	/**
+	 * Write a batch as Cognee question/answer entries.
+	 *
+	 * A user message immediately followed by an assistant message is the normal
+	 * agent turn and becomes one paired entry. Every other message is written on
+	 * its own with a placeholder on the missing side — never dropped — so a lone
+	 * user message, a trailing question, or a system/tool message still reaches
+	 * Cognee and shows up in Recall and Session → Get.
+	 */
 	async addMessages(messages: Message[]): Promise<void> {
-		for (const message of messages) {
-			await this.addMessage(message);
-		}
-		if (this.pendingUser) {
-			await this.storeTurn(textOf(this.pendingUser), NO_ANSWER);
-			this.pendingUser = null;
+		let index = 0;
+		while (index < messages.length) {
+			const current = messages[index];
+			const next = messages[index + 1];
+
+			if (current.role === 'user' && next?.role === 'assistant') {
+				await this.storeTurn(textOf(current), textOf(next));
+				index += 2;
+				continue;
+			}
+			if (current.role === 'user') {
+				await this.storeTurn(textOf(current), NO_ANSWER);
+			} else if (current.role === 'assistant') {
+				await this.storeTurn(NO_QUESTION, textOf(current));
+			} else {
+				// system / tool messages have no Q&A shape; keep them as context-only rows.
+				await this.storeTurn(`[${current.role}]`, textOf(current));
+			}
+			index += 1;
 		}
 	}
 

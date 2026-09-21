@@ -78,8 +78,8 @@ Parameters:
 
 Notes:
 
-- Works with n8n's **Chat Memory Manager** node too (Get / Insert). Insert pairs consecutive user and assistant messages into one Q&A entry.
-- **Delete / clear is not supported yet**: Cognee has no endpoint to clear one session. Start a new Session ID for a fresh conversation, or use Cognee → Memory → Forget on the dataset. The node raises a clear error instead of silently ignoring the request.
+- Works with n8n's **Chat Memory Manager** node for **Get Many Messages** and **Insert Messages**. A user message immediately followed by an assistant message becomes one Q&A entry; any other message is stored on its own with a placeholder on the missing side, so nothing is dropped.
+- **Clearing a session is not supported yet**, because Cognee has no endpoint that deletes a single session. The Chat Memory Manager operations that wipe memory first — **Delete Messages**, and **Insert Messages** with **Override All Messages** — fail with an explanatory error rather than silently doing nothing. Start a new Session ID for a fresh conversation, or use Cognee → Memory → Forget on the dataset.
 - Requires n8n **2.16 or newer** (the release that made `@n8n/ai-node-sdk` available to community nodes). The Cognee action node itself has no such requirement.
 
 ## Operations
