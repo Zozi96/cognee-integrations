@@ -7,6 +7,9 @@
 
 export const RECALL_AUTO = 'AUTO';
 
+/** Cognee's own default dataset, used when no dataset name is given. */
+export const DEFAULT_DATASET_NAME = 'main_dataset';
+
 function cleanList(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
   return values
@@ -193,6 +196,14 @@ export interface RememberEntryParams {
   sessionId: string;
   datasetName?: string;
   datasetId?: string;
+  /**
+   * Allow a qa entry with only one side filled. Cognee stores half-filled Q&A
+   * itself (its own session writes use an empty question), and the chat-memory
+   * sub-node needs it so a single inserted message round-trips as one message
+   * rather than a pair padded with placeholder text. The Remember Entry
+   * operation leaves this off and keeps requiring both sides.
+   */
+  allowPartialQa?: boolean;
   /** Type-specific fields; irrelevant ones are ignored. */
   fields: {
     question?: string;
@@ -222,8 +233,17 @@ export function buildRememberEntryPayload(params: RememberEntryParams): Record<s
     case 'qa': {
       const question = nonEmpty(f.question);
       const answer = nonEmpty(f.answer);
-      if (!question || !answer) throw new Error('Question and Answer are required for a qa entry');
-      entry = { type: 'qa', question, answer, context: f.context ?? '' };
+      if (params.allowPartialQa) {
+        if (!question && !answer) throw new Error('A qa entry needs a Question or an Answer');
+      } else if (!question || !answer) {
+        throw new Error('Question and Answer are required for a qa entry');
+      }
+      entry = {
+        type: 'qa',
+        question: question ?? '',
+        answer: answer ?? '',
+        context: f.context ?? '',
+      };
       const feedbackText = nonEmpty(f.feedbackText);
       if (feedbackText) entry.feedback_text = feedbackText;
       if (typeof f.feedbackScore === 'number') entry.feedback_score = Math.round(f.feedbackScore);
@@ -265,7 +285,7 @@ export function buildRememberEntryPayload(params: RememberEntryParams): Record<s
   const payload: Record<string, unknown> = {
     entry,
     session_id: sessionId,
-    dataset_name: nonEmpty(params.datasetName) ?? 'main_dataset',
+    dataset_name: nonEmpty(params.datasetName) ?? DEFAULT_DATASET_NAME,
   };
   const datasetId = nonEmpty(params.datasetId);
   if (datasetId) payload.dataset_id = datasetId;
