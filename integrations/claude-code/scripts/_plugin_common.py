@@ -177,9 +177,12 @@ apply_cognee_env()
 
 
 def _sanitize_session_key(value: str) -> str:
+    # ASCII-only allowed set [A-Za-z0-9-_.], to stay identical across integrations
+    # (including the TypeScript openclaw one). `isascii()` guards against unicode
+    # letters/digits that `isalnum()` would otherwise keep.
     safe = []
     for ch in str(value or ""):
-        if ch.isalnum() or ch in ("-", "_", "."):
+        if (ch.isascii() and ch.isalnum()) or ch in ("-", "_", "."):
             safe.append(ch)
         else:
             safe.append("_")
@@ -920,7 +923,10 @@ def cross_dataset_search_command() -> str:
     """The one-off graph search on another dataset, as the hint and the lister
     spell it for the model: ``cognee-search.sh "<query>" 10 --graph --dataset-id <id>``."""
     script = Path(__file__).resolve().parent / "cognee-search.sh"
-    return f'{script} "<query>" 10 --graph --dataset-id <id>'
+    # Quoted: the plugin root follows the host's config home, and the managed
+    # defaults contain a space (topoteretes/cognee#5154), so a bare path would
+    # hand the model a command that word-splits.
+    return f'"{script}" "<query>" 10 --graph --dataset-id <id>'
 
 
 def _readable_datasets_cache_key(service_url: str, api_key: str) -> str:

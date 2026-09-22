@@ -12,6 +12,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.2.2]
 
+### Added
+- **Catalog installation support.** CLI status and version commands recognize
+  Hermes' catalog marker, report the running plugin version, and direct updates
+  through `hermes plugins update cognee`. Catalog copies skip PyPI checks even
+  with `--check-updates`, and `cognee-hermes-install` refuses to overwrite them,
+  including copies with damaged catalog metadata. Installation and setup docs
+  now distinguish catalog and pip workflows; catalog-name installation is marked
+  as available after acceptance.
+
 ### Changed
 - **The per-prompt recall prefetch dispatches every lane at once.** The layered
   lanes (`session`, `trace`, `session_context`, `graph`, plus `code` when armed)
@@ -27,6 +36,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `content_type="code"`, the `code` recall scope and targeted session invalidation on
   document delete still date from 1.5.3. The installed package doubles as the local
   server this plugin spawns, so the pin and the wire contract have to move together.
+- **Connections identify Hermes explicitly.** Agent registration now sends
+  `type: hermes_agent` instead of the generic `type: api`, so the Cognee server
+  can distinguish Hermes connections from other API clients.
+- **Package metadata declares Apache-2.0.** `pyproject.toml` now includes the
+  license identifier.
+- **The README links Hermes' installation guide** instead of inlining its
+  `curl … | bash` one-liner. The catalog's install scanner flags a piped shell
+  script even inside a README, and `hermes plugins validate` now reports
+  `security scan — safe` with no warnings.
+- **The README makes the existing Python 3.10+ requirement explicit**, including
+  guidance for macOS users whose Xcode Command Line Tools provide Python 3.9.
+  The minimum supported Python version has not changed.
 
 ### Fixed
 - **Repo indexing submitted the repository under a field the server had stopped

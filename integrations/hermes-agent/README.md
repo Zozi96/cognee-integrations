@@ -58,8 +58,11 @@ Python package with the `hermes_agent.plugins` entry point.
   own floor; `pip` refuses to install it on 3.9. Note that macOS's Xcode
   Command Line Tools ship Python 3.9.6 — use a Homebrew, python.org or
   [uv](https://docs.astral.sh/uv/)-managed 3.10+ interpreter instead.
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed
-  (`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`).
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed — see
+  the [Hermes installation guide](https://hermes-agent.nousresearch.com/docs/getting-started/installation).
+  (The install one-liner is quoted there rather than here: the catalog's install
+  scanner flags a piped shell script even inside a README, and a clean scan is
+  one less thing for a catalog reviewer to read past.)
 - **Local mode:** an LLM API key (e.g. OpenAI) — cognee uses it to build the
   knowledge graph on your machine.
 - **Cloud mode:** a Cognee Cloud tenant URL and API key from your
@@ -68,19 +71,33 @@ Python package with the `hermes_agent.plugins` entry point.
 
 ### 1. Install the plugin
 
-Via pip (recommended):
+**Hermes catalog — available after catalog acceptance:**
+
+```bash
+hermes plugins install cognee
+hermes plugins enable cognee
+hermes memory setup
+```
+
+Catalog installs use the commit reviewed by Hermes. Update them with
+`hermes plugins update cognee`; a newer PyPI release does not change the
+reviewed catalog version. The pip installer refuses to overwrite a catalog copy.
+
+**Via pip (available now):**
 
 ```bash
 pip install cognee-integration-hermes-agent
 cognee-hermes-install
 ```
 
-Hermes discovers plugins by scanning `~/.hermes/plugins/`, so the second
-command copies the plugin there — `pip install` alone is not enough, and after
-a `pip install -U` you re-run `cognee-hermes-install` to update the copy
-(`hermes cognee status` reminds you when the two drift).
+The pip package registers the memory provider through Hermes' entry-point
+discovery. The second command copies it into `~/.hermes/plugins/cognee/` to
+also provide the CLI and dashboard integration. For this installation method,
+update with `pip install -U cognee-integration-hermes-agent` followed by
+`cognee-hermes-install` (`hermes cognee status` reminds you when the two drift).
 
-Or from a checkout of this repository:
+Or, for development, copy a checkout into a Hermes home with no existing
+Cognee installation (do not copy over a catalog-managed plugin):
 
 ```bash
 git clone https://github.com/topoteretes/cognee-integrations.git
@@ -150,9 +167,10 @@ Hermes discovers memory providers two ways, and the package serves both:
   recommended path: it carries the `hermes cognee` subcommands and the
   dashboard config panel at full fidelity.
 
-Because Hermes runs the directory *copy*, upgrading it is always two steps:
+For a pip-managed directory *copy*, upgrading takes two steps:
 `pip install -U cognee-integration-hermes-agent`, then `cognee-hermes-install`
-again (`hermes cognee status` reminds you when the copy is stale).
+again (`hermes cognee status` reminds you when the copy is stale). Catalog
+installations instead use `hermes plugins update cognee`.
 
 Releases are published from CI on `hermes-agent-v*` tags
 (`.github/workflows/hermes-agent-publish.yml`).
@@ -430,10 +448,15 @@ hermes cognee install
 hermes cognee index-repo <path-or-url> [--dataset D] [--index-vectors] [--wait SECONDS]
 ```
 
-`status` and `version` include an update hint when PyPI has a newer release
+For pip installations, `status` and `version` include an update hint when PyPI has a newer release
 (checked at most once per `COGNEE_UPDATE_CHECK_INTERVAL`, never from a live
 session): update with `pip install -U cognee-integration-hermes-agent` and then
 `cognee-hermes-install`, since Hermes runs the installed copy.
+
+For catalog installations, these commands show the running plugin version and
+direct you to `hermes plugins update cognee`. They never query PyPI, even with
+`--check-updates`; that flag prints catalog update guidance rather than checking
+for a new catalog release. `hermes plugins update cognee` checks the catalog.
 
 ## Development
 

@@ -10,6 +10,18 @@ is the cache key and semver record, bumped on each release, not the update trigg
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.7]
+
+### Fixed
+- **The cross-dataset search hint broke on an install path containing a space.** The
+  "Other Cognee datasets you can search" line the prompt hook appends spells out
+  `cognee-search.sh "<query>" 10 --graph --dataset-id <id>` with the script's resolved
+  absolute path, and that path was interpolated bare — so on such an install the model
+  was handed a command that word-split before it could run. Quoted. Codex's own hook
+  manifest already quoted `${PLUGIN_ROOT}`, so only this one command was affected;
+  the Claude Code plugin hit the same defect across its whole manifest
+  ([#5154](https://github.com/topoteretes/cognee/issues/5154)).
+
 ## [1.6.6]
 
 ### Added

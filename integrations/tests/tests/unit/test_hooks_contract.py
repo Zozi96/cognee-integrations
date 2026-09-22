@@ -30,8 +30,13 @@ EXPECTED = [
     ("SessionEnd", "sync-session-to-graph.py", "--session-end"),
 ]
 
-#: ${CLAUDE_PLUGIN_ROOT} / ${PLUGIN_ROOT}, quoted or bare.
-_PLUGIN_ROOT = re.compile(r'"?\$\{(?:CLAUDE_)?PLUGIN_ROOT\}"?')
+#: A plugin-root placeholder on its own: ${CLAUDE_PLUGIN_ROOT} or ${PLUGIN_ROOT}.
+_PLUGIN_ROOT = re.compile(r"\$\{(?:CLAUDE_)?PLUGIN_ROOT\}")
+
+#: A *quoted* plugin-root path — "${CLAUDE_PLUGIN_ROOT}/scripts/foo.py" — capturing
+#: the path that follows the placeholder. The surrounding quotes are mandatory; see
+#: test_every_plugin_root_reference_is_quoted.
+_QUOTED_PLUGIN_ROOT_PATH = re.compile(r'"\$\{(?:CLAUDE_)?PLUGIN_ROOT\}(/[^"]*)"')
 
 
 @pytest.fixture
@@ -97,17 +102,60 @@ def test_every_python_hook_falls_back_to_python(suite, manifest):
     )
 
 
+def test_every_plugin_root_reference_is_quoted(suite, manifest):
+    """Every ${CLAUDE_PLUGIN_ROOT} path must be wrapped in double quotes.
+
+    Hook commands run through a shell, and the plugin root is not ours to pick —
+    it follows the host's config home. Anthropic's own managed defaults contain a
+    space on both platforms (`/Library/Application Support/Claude/org-plugins`,
+    `%ProgramFiles%\\Claude\\org-plugins`), so a bare path word-splits and the
+    interpreter dies on a truncated filename.
+
+    PreCompact is the only event loud enough to notice: it exits non-zero, which
+    Claude Code treats as a blocking error, so /compact is refused. Every other
+    hook here is async or non-blocking, so it fails *silently* — memory capture
+    simply stops with nothing to indicate why. Asserted across the whole manifest
+    rather than the events in EXPECTED, for the same reason the python fallback is.
+
+    Reported as topoteretes/cognee#5154.
+    """
+    unquoted = []
+    for event, groups in manifest.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for hook in group.get("hooks", []):
+                command = str(hook.get("command", "")) if isinstance(hook, dict) else ""
+                # Drop the references that are correctly quoted; a placeholder
+                # surviving that means it was bare.
+                if _PLUGIN_ROOT.search(_QUOTED_PLUGIN_ROOT_PATH.sub("", command)):
+                    unquoted.append((event, command[:90]))
+    assert not unquoted, (
+        f"{suite.name}: unquoted plugin-root paths break on any install whose root "
+        f"contains a space (e.g. a managed install under "
+        f"'/Library/Application Support/Claude/org-plugins'): {unquoted}"
+    )
+
+
 def test_every_registered_script_exists(suite, manifest):
     """A renamed or deleted script must fail here, not silently at runtime."""
     missing = []
+    resolved = 0
     for event, groups in manifest.items():
         for group in groups:
             for hook in group.get("hooks", []):
                 command = str(hook.get("command", ""))
-                for token in _PLUGIN_ROOT.sub("", command).split():
-                    if not token.endswith((".py", ".sh")):
+                for path in _QUOTED_PLUGIN_ROOT_PATH.findall(command):
+                    if not path.endswith((".py", ".sh")):
                         continue
-                    name = token.lstrip("/").removeprefix("scripts/")
+                    resolved += 1
+                    name = path.lstrip("/").removeprefix("scripts/")
                     if not (suite.scripts_dir / name).exists():
                         missing.append((event, name))
     assert not missing, f"{suite.name}: hooks.json points at missing scripts: {missing}"
+    # Guard the guard: the matcher above only sees *quoted* paths, so if quoting
+    # ever regressed it would find nothing and this test would pass having checked
+    # no scripts at all.
+    assert resolved, f"{suite.name}: no quoted plugin-root script paths found in hooks.json"

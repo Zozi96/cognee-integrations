@@ -273,8 +273,8 @@ The same flow is available on demand through the `cognee-search` skill when an e
 back empty. Under the hood:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py --others   # the candidates
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh "<query>" 10 --graph --dataset-id <uuid>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py" --others   # the candidates
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "<query>" 10 --graph --dataset-id <uuid>
 ```
 
 A dataset other than the active one has none of this session's history, so the wrapper forces
@@ -385,7 +385,7 @@ changed the working tree. Index one explicitly — a different repo, a git URL, 
 automation declined — with:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-index-repo.sh <repo-path-or-git-url> [--dataset <name>] [--index-vectors] [--wait <seconds>]
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-index-repo.sh" <repo-path-or-git-url> [--dataset <name>] [--index-vectors] [--wait <seconds>]
 ```
 
 Query it with `cognee-search.sh ... --code` (see the `cognee-code` skill for the

@@ -10,6 +10,29 @@ Code only offers an update when that string changes. Tag releases as
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.7]
+
+### Fixed
+- **Every hook was dead on an install whose plugin root contains a space
+  ([#5154](https://github.com/topoteretes/cognee/issues/5154)).** The hook commands
+  interpolated `${CLAUDE_PLUGIN_ROOT}` unquoted. Hook commands run through a shell, so
+  a root with a space word-split and the interpreter died on a truncated filename —
+  `can't open file '/Users/<you>/Library/Application'`. The `|| python` fallback added
+  for Windows did not help: both halves split on the same space. The plugin root is not
+  ours to choose, it follows the host's config home, and the managed defaults contain a
+  space on both platforms (`/Library/Application Support/Claude/org-plugins`,
+  `%ProgramFiles%\Claude\org-plugins`), so managed Windows installs were affected
+  too — this was never Mac-specific. `PreCompact` was the only event loud enough to
+  notice, exiting non-zero so Claude Code refused to compact; the rest are async or
+  non-blocking and failed silently, which meant memory capture and recall simply
+  stopped with nothing to indicate why. All 20 references are now quoted.
+- **The skills and the agent handed the model commands that broke the same way.** The
+  37 `${CLAUDE_PLUGIN_ROOT}/scripts/...` invocations across the skills, the recall
+  agent and the README are run by the model in Bash, so on such a root none of them
+  could start — including the cross-dataset search the prompt hook suggests on every
+  answered prompt, which is built at run time from the resolved script path. Quoted
+  throughout.
+
 ## [1.5.6]
 
 ### Added
