@@ -2,13 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { ISupplyDataFunctions } from 'n8n-workflow';
 
 import {
-	CLEAR_UNSUPPORTED_MESSAGE,
 	CogneeChatHistory,
-	CogneeChatMemory,
-	CogneeRequestError,
+	ROLE_MARKER,
+	assertEntryStored,
 	sessionEntriesToMessages,
-	toCogneeRequestError,
-	windowMessages,
 } from '../nodes/CogneeMemory/memory';
 import type { CogneeRequestOptions } from '../nodes/CogneeMemory/memory';
 import { CogneeMemory } from '../nodes/CogneeMemory/CogneeMemory.node';
@@ -20,7 +17,10 @@ function fakeRequest(responses: Record<string, unknown | (() => unknown)> = {}) 
 	const request = async (options: Call) => {
 		calls.push(options);
 		const key = `${options.method} ${options.url}`;
-		if (!(key in responses)) return {};
+		// Writes answer like the real endpoint, so assertEntryStored is satisfied.
+		if (!(key in responses)) {
+			return options.method === 'POST' ? { status: 'session_stored', entry_id: 'qa-1' } : {};
+		}
 		const value = responses[key];
 		return typeof value === 'function' ? (value as () => unknown)() : value;
 	};
@@ -42,7 +42,7 @@ const sessionBody = {
 	traces: [],
 };
 
-describe('sessionEntriesToMessages / windowMessages', () => {
+describe('sessionEntriesToMessages', () => {
 	it('maps Q&A entries to alternating user/assistant messages, oldest first, skipping empty rows', () => {
 		expect(sessionEntriesToMessages(sessionBody)).toEqual([
 			{ role: 'user', content: [{ type: 'text', text: 'Hi' }] },
@@ -52,150 +52,111 @@ describe('sessionEntriesToMessages / windowMessages', () => {
 		]);
 	});
 
+	it('emits only the sides that were written, and honours the role marker', () => {
+		expect(
+			sessionEntriesToMessages({
+				qas: [
+					{ question: 'Q', answer: '' },
+					{ question: '', answer: 'A' },
+					{ question: '', answer: 'be terse', context: `${ROLE_MARKER}system` },
+					{ question: '', answer: 'x', context: `${ROLE_MARKER}bogus` },
+				],
+			}),
+		).toEqual([
+			{ role: 'user', content: [{ type: 'text', text: 'Q' }] },
+			{ role: 'assistant', content: [{ type: 'text', text: 'A' }] },
+			{ role: 'system', content: [{ type: 'text', text: 'be terse' }] },
+		]);
+	});
+
 	it('tolerates unexpected shapes', () => {
 		expect(sessionEntriesToMessages(null)).toEqual([]);
 		expect(sessionEntriesToMessages({ qas: 'nope' })).toEqual([]);
 		expect(sessionEntriesToMessages({ qas: [null, 5] })).toEqual([]);
 	});
-
-	it('keeps only the last N pairs', () => {
-		const messages = sessionEntriesToMessages(sessionBody);
-		expect(windowMessages(messages, 1)).toEqual(messages.slice(-2));
-		expect(windowMessages(messages, 10)).toEqual(messages);
-	});
 });
 
-describe('toCogneeRequestError', () => {
-	it('reads the status from n8n, axios and plain error shapes', () => {
-		expect(toCogneeRequestError({ message: 'x', httpCode: '404' }).statusCode).toBe(404);
-		expect(toCogneeRequestError({ message: 'x', response: { status: 500 } }).statusCode).toBe(500);
-		expect(toCogneeRequestError({ message: 'x', cause: { statusCode: 401 } }).statusCode).toBe(401);
-		expect(toCogneeRequestError(new Error('boom')).statusCode).toBeUndefined();
-		expect(toCogneeRequestError(undefined).message).toBe('Cognee request failed');
-	});
-});
-
-describe('CogneeChatMemory', () => {
-	it('loads the windowed history from GET /v1/sessions/{id}', async () => {
+describe('CogneeChatHistory reads', () => {
+	it('loads the session from GET /v1/sessions/{id}, url-encoding the id', async () => {
 		const { calls, request } = fakeRequest({ 'GET /v1/sessions/chat%201': sessionBody });
-		const memory = new CogneeChatMemory({
+		const messages = await new CogneeChatHistory({
 			sessionId: 'chat 1',
 			datasetName: 'main_dataset',
-			windowSize: 1,
 			request,
-		});
-		const messages = await memory.loadMessages();
+		}).getMessages();
 		expect(calls).toEqual([{ method: 'GET', url: '/v1/sessions/chat%201', allowNotFound: true }]);
-		expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
-		expect(messages[1].content).toEqual([{ type: 'text', text: 'Ulm.' }]);
+		expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+		expect(messages[3].content).toEqual([{ type: 'text', text: 'Ulm.' }]);
 	});
 
-	it('treats a missing session (transport yields undefined on 404) as empty and propagates other errors', async () => {
+	// The transport turns an allowed 404 into undefined; the node suite covers the
+	// end-to-end version where a real 404 comes back from n8n's HTTP helper.
+	it('reads an absent session as an empty history and propagates other failures', async () => {
 		const notFound = fakeRequest({ 'GET /v1/sessions/new': () => undefined });
-		const memory = new CogneeChatMemory({
-			sessionId: 'new',
-			datasetName: 'main_dataset',
-			windowSize: 5,
-			request: notFound.request,
-		});
-		expect(await memory.loadMessages()).toEqual([]);
+		expect(
+			await new CogneeChatHistory({
+				sessionId: 'new',
+				datasetName: 'd',
+				request: notFound.request,
+			}).getMessages(),
+		).toEqual([]);
 
 		const failing = fakeRequest({
 			'GET /v1/sessions/new': () => {
-				throw new CogneeRequestError('unauthorized', 401);
+				throw new Error('unauthorized');
 			},
 		});
-		const broken = new CogneeChatMemory({
-			sessionId: 'new',
-			datasetName: 'main_dataset',
-			windowSize: 5,
-			request: failing.request,
-		});
-		await expect(broken.loadMessages()).rejects.toThrow(/unauthorized/);
-	});
-
-	it('saves each turn as one qa entry via POST /v1/remember/entry', async () => {
-		const { calls, request } = fakeRequest();
-		const memory = new CogneeChatMemory({
-			sessionId: 'chat-1',
-			datasetName: 'support',
-			windowSize: 10,
-			request,
-		});
-		await memory.saveTurn('What is Cognee?', 'A memory engine.');
-		expect(calls).toEqual([
-			{
-				method: 'POST',
-				url: '/v1/remember/entry',
-				body: {
-					entry: {
-						type: 'qa',
-						question: 'What is Cognee?',
-						answer: 'A memory engine.',
-						context: '',
-					},
-					session_id: 'chat-1',
-					dataset_name: 'support',
-				},
-			},
-		]);
-	});
-
-	it('clamps the window to what the server returns and refuses clear() with a clear message', async () => {
-		const { request } = fakeRequest();
-		const memory = new CogneeChatMemory({
-			sessionId: 's',
-			datasetName: 'd',
-			windowSize: 999,
-			request,
-		});
-		expect((memory as unknown as { windowSize: number }).windowSize).toBe(20);
-		await expect(memory.clear()).rejects.toThrow(CLEAR_UNSUPPORTED_MESSAGE);
+		await expect(
+			new CogneeChatHistory({
+				sessionId: 'new',
+				datasetName: 'd',
+				request: failing.request,
+			}).getMessages(),
+		).rejects.toThrow(/unauthorized/);
 	});
 });
 
 describe('CogneeChatHistory (Chat Memory Manager path)', () => {
-	it('pairs user and assistant messages into qa entries and pads unpaired ones', async () => {
+	const entriesOf = (calls: Call[]) =>
+		calls.map((c) => (c.body as { entry: Record<string, unknown> }).entry);
+
+	it('stores a full agent turn as one paired entry', async () => {
 		const { calls, request } = fakeRequest();
-		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
+		});
 		await history.addMessages([
 			{ role: 'user', content: [{ type: 'text', text: 'Q1' }] },
 			{ role: 'assistant', content: [{ type: 'text', text: 'A1' }] },
-			{ role: 'user', content: [{ type: 'text', text: 'Q2 (never answered)' }] },
 		]);
-		const entries = calls.map(
-			(c) => (c.body as { entry: { question: string; answer: string } }).entry,
-		);
-		expect(entries).toEqual([
-			{ type: 'qa', question: 'Q1', answer: 'A1', context: '' },
-			{
-				type: 'qa',
-				question: 'Q2 (never answered)',
-				answer: '(no assistant message)',
-				context: '',
-			},
-		]);
+		expect(entriesOf(calls)).toEqual([{ type: 'qa', question: 'Q1', answer: 'A1', context: '' }]);
 	});
 
 	// Regression: the Chat Memory Manager node adds messages one at a time and
 	// never calls addMessages, so anything buffered waiting for a counterpart
 	// was silently dropped when the instance went away.
-	it('writes a lone user message immediately instead of buffering it', async () => {
+	it('writes a lone user message immediately, with the answer side left empty', async () => {
 		const { calls, request } = fakeRequest();
-		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
-		await history.addMessage({ role: 'user', content: [{ type: 'text', text: 'remember this' }] });
-		expect(calls).toHaveLength(1);
-		expect((calls[0].body as { entry: unknown }).entry).toEqual({
-			type: 'qa',
-			question: 'remember this',
-			answer: '(no assistant message)',
-			context: '',
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
 		});
+		await history.addMessage({ role: 'user', content: [{ type: 'text', text: 'remember this' }] });
+		expect(entriesOf(calls)).toEqual([
+			{ type: 'qa', question: 'remember this', answer: '', context: '' },
+		]);
 	});
 
-	it('loses nothing when messages arrive one at a time', async () => {
+	it('keeps each one-at-a-time message on its own side, and system roles in context', async () => {
 		const { calls, request } = fakeRequest();
-		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
+		});
 		for (const message of [
 			{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Q' }] },
 			{ role: 'assistant' as const, content: [{ type: 'text' as const, text: 'A' }] },
@@ -203,21 +164,94 @@ describe('CogneeChatHistory (Chat Memory Manager path)', () => {
 		]) {
 			await history.addMessage(message);
 		}
-		const entries = calls.map(
-			(c) => (c.body as { entry: { question: string; answer: string } }).entry,
-		);
-		expect(entries).toEqual([
-			{ type: 'qa', question: 'Q', answer: '(no assistant message)', context: '' },
-			{ type: 'qa', question: '(no user message)', answer: 'A', context: '' },
-			{ type: 'qa', question: '[system]', answer: 'be terse', context: '' },
+		expect(entriesOf(calls)).toEqual([
+			{ type: 'qa', question: 'Q', answer: '', context: '' },
+			{ type: 'qa', question: '', answer: 'A', context: '' },
+			{ type: 'qa', question: '', answer: 'be terse', context: `${ROLE_MARKER}system` },
 		]);
+	});
+
+	// The review case: inserting Q then A one at a time used to round-trip as four
+	// messages, two of them invented placeholder text.
+	it('round-trips one-at-a-time inserts back to exactly the messages inserted', async () => {
+		const { calls, request } = fakeRequest();
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
+		});
+		const inserted = [
+			{ role: 'system' as const, content: [{ type: 'text' as const, text: 'be terse' }] },
+			{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Q' }] },
+			{ role: 'assistant' as const, content: [{ type: 'text' as const, text: 'A' }] },
+		];
+		for (const message of inserted) await history.addMessage(message);
+
+		// Replay what the server would return for those writes.
+		const qas = entriesOf(calls).map((entry) => ({
+			question: entry.question,
+			answer: entry.answer,
+			context: entry.context,
+		}));
+		expect(sessionEntriesToMessages({ qas })).toEqual(inserted);
+	});
+
+	it('skips a message with no text rather than storing an empty entry', async () => {
+		const { calls, request } = fakeRequest();
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
+		});
+		await history.addMessage({ role: 'user', content: [] });
+		expect(calls).toHaveLength(0);
+	});
+
+	it('fails loudly when Cognee answers 200 but did not store the turn', async () => {
+		const { request } = fakeRequest({
+			'POST /v1/remember/entry': () => ({ status: 'errored', error: 'add_qa returned None' }),
+		});
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
+		});
+		await expect(
+			history.addMessage({ role: 'user', content: [{ type: 'text', text: 'Q' }] }),
+		).rejects.toThrow(/did not store the conversation turn/);
+	});
+
+	it('sends a dataset ID when given one, for a shared dataset', async () => {
+		const { calls, request } = fakeRequest();
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			datasetId: 'd-uuid',
+			request,
+		});
+		await history.addMessage({ role: 'user', content: [{ type: 'text', text: 'Q' }] });
+		expect(calls[0].body).toMatchObject({ dataset_id: 'd-uuid' });
 	});
 
 	it('rejects clear() naming the Chat Memory Manager operations it blocks', async () => {
 		const { calls, request } = fakeRequest();
-		const history = new CogneeChatHistory('chat-1', 'main_dataset', request);
+		const history = new CogneeChatHistory({
+			sessionId: 'chat-1',
+			datasetName: 'main_dataset',
+			request,
+		});
 		await expect(history.clear()).rejects.toThrow(/Delete Messages.*Override All Messages/s);
 		expect(calls).toHaveLength(0);
+	});
+});
+
+describe('assertEntryStored', () => {
+	it('accepts a stored entry and rejects an errored or id-less one', () => {
+		expect(() => assertEntryStored({ status: 'session_stored', entry_id: 'q1' })).not.toThrow();
+		expect(() => assertEntryStored(undefined)).not.toThrow();
+		expect(() => assertEntryStored({ status: 'errored' })).toThrow(/did not store/);
+		expect(() => assertEntryStored({ status: 'session_stored' })).toThrow(/did not store/);
+		expect(() => assertEntryStored({ error: 'boom' })).toThrow(/boom/);
 	});
 });
 

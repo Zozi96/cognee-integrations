@@ -5,13 +5,13 @@ Use Cognee Cloud's AI memory and context engineering directly in your n8n workfl
 The package ships two nodes:
 
 - **Cognee** — an action node covering the Cognee `/api/v1` API (memory, datasets, search, skills)
-- **Cognee Memory** — an AI Agent **memory sub-node**: plug it into the Agent's Memory port and the conversation is stored in Cognee as a session, where it is cognified into your knowledge graph
+- **Cognee Memory** — an AI Agent **memory sub-node**: plug it into the Agent's Memory port and the conversation is stored in Cognee as a session, so chat history survives restarts and is readable from any Cognee client
 
 This community node package lets you:
 
-- Give an **AI Agent persistent memory** backed by Cognee with the Cognee Memory sub-node
+- Give an **AI Agent durable chat memory** with the Cognee Memory sub-node — no separate Redis or Postgres needed if you already run Cognee
 - **Remember** text or files, **Recall** with knowledge-graph search, and **Forget** data — Cognee's memory API in three operations
-- Store session **Q&A, trace and feedback entries** so an AI Agent's conversation becomes searchable memory
+- Store session **Q&A, trace and feedback entries** and search them back with session-scoped Recall
 - Add text data to a Cognee dataset
 - Turn data into AI memory with cognify, and enrich an existing graph with memify
 - Run search over your AI memory datasets
@@ -61,24 +61,33 @@ Create credentials of type `Cognee API` in n8n. The node uses these values to au
 
 ## Sub-node: Cognee Memory
 
+> **Self-hosted prerequisite**: the session cache must be enabled on your Cognee server (`CACHING=true`). Without it `POST /api/v1/remember/entry` answers **503** and the sub-node cannot store turns. Cognee Cloud has it enabled already.
+
 `Cognee Memory` is a memory sub-node for n8n's **AI Agent** node, built on [`@n8n/ai-node-sdk`](https://github.com/n8n-io/n8n/tree/master/packages/%40n8n/ai-node-sdk). It appears next to Simple Memory, Redis Chat Memory and Postgres Chat Memory when you click the Agent's **Memory** port.
+
+**Use it when** you already run Cognee and want durable chat history without standing up a second datastore. The conversation persists across restarts, and it is readable from Cognee's own tooling rather than sitting opaque in Redis.
+
+**It is not how the agent reaches your knowledge graph.** n8n's memory port carries chat history only, for every vendor. To let an agent search what you have ingested into Cognee, attach the **Cognee** node to the agent's **Tool** port. That is where the knowledge graph does its work, and it is independent of this sub-node.
 
 What it does per agent turn:
 
 - **Load**: `GET /api/v1/sessions/{sessionId}` — the last *Window Size* question/answer pairs of the session are handed to the agent as chat history
 - **Save**: `POST /api/v1/remember/entry` — the user message and the agent's reply are stored as one `qa` session entry
 
-Because the turns land in a Cognee session, Cognee cognifies them into the dataset's knowledge graph. The same conversation is then reachable from the **Cognee** node (Memory → Recall with the Session ID, Session → Get) and from any other Cognee client, so the agent's memory is not locked inside n8n.
+The turns land in a Cognee session, so the same conversation is reachable from the **Cognee** node (Memory → Recall with the Session ID, Session → Get) and from any other Cognee client. The agent's memory is not locked inside n8n.
+
+Sessions are stored separately from a dataset's knowledge graph, and session entries do **not** become graph nodes on their own. To search a whole conversation, including turns older than the loaded window, use **Memory → Recall** with the same Session ID and the **session** scope. For knowledge the agent should search rather than replay, attach the Cognee node to the agent's **Tool** port and point it at a dataset you have ingested.
 
 Parameters:
 
 - **Session ID** (required, default `{{ $json.sessionId }}`): the Cognee session to store the conversation under. Use the chat trigger's session ID or any stable per-user/per-conversation key.
-- **Options → Dataset Name** (default `main_dataset`): dataset the session is attributed to and cognified into.
+- **Options → Dataset Name** (default `main_dataset`): dataset this session is *attributed* to, recorded on the session the first time it is written. It does not scope the history: sessions are keyed per Cognee user and session ID, not per dataset, and a later write does not move an existing session. Reusing one Session ID under two dataset names mixes a single history rather than splitting it, so keep Session IDs globally unique or namespace them yourself.
+- **Options → Dataset ID**: attribute by dataset UUID instead of by name. Required for a dataset shared with you, because a name only resolves among datasets you own. Takes precedence over Dataset Name.
 - **Options → Window Size** (default 10, max 20): number of recent Q&A pairs loaded into the agent context. Cognee's session detail endpoint returns the most recent 20 pairs.
 
 Notes:
 
-- Works with n8n's **Chat Memory Manager** node for **Get Many Messages** and **Insert Messages**. A user message immediately followed by an assistant message becomes one Q&A entry; any other message is stored on its own with a placeholder on the missing side, so nothing is dropped.
+- Works with n8n's **Chat Memory Manager** node for **Get Many Messages** and **Insert Messages**. A user message immediately followed by an assistant message is stored as one Q&A entry. Any other message is stored half-filled, with only the side it belongs to, so inserting messages one at a time reads back as exactly those messages. System and tool messages keep their role in the entry's context field. A message with no text is skipped, since there is nothing to store.
 - **Clearing a session is not supported yet**, because Cognee has no endpoint that deletes a single session. The Chat Memory Manager operations that wipe memory first — **Delete Messages**, and **Insert Messages** with **Override All Messages** — fail with an explanatory error rather than silently doing nothing. Start a new Session ID for a fresh conversation, or use Cognee → Memory → Forget on the dataset.
 - Requires n8n **2.16 or newer** (the release that made `@n8n/ai-node-sdk` available to community nodes). The Cognee action node itself has no such requirement.
 
@@ -249,8 +258,8 @@ Persistent chat memory for an AI Agent (recommended):
    - Credential: your `Cognee API` credential
    - Session ID: `{{ $json.sessionId }}` (the chat trigger's session)
    - Options → Dataset Name: `support_chat`, Window Size: `10`
-3. Chat. Every turn is stored as a Cognee session entry and cognified into `support_chat`.
-4. Optionally add the **Cognee** node as an Agent **Tool** (Memory → Recall over `support_chat`) so the agent can also search older conversations and any documents you remembered into the same dataset.
+3. Chat. Every turn is stored as a Cognee session entry attributed to `support_chat`.
+4. Add the **Cognee** node as an Agent **Tool** so the agent can search knowledge, not just replay the conversation. Point it at Memory → Recall over the datasets you have ingested. This is where Cognee's knowledge graph does its work; the Memory port only carries chat history.
 
 Manual chat memory with the Cognee action node (when you need full control over what is recalled):
 
@@ -305,7 +314,7 @@ The package depends on `n8n-workflow` and `@n8n/ai-node-sdk` at runtime (peer de
 
 ## Version history
 
-- **0.7.0**: Add the **Cognee Memory** sub-node for the AI Agent's Memory port, built on `@n8n/ai-node-sdk`: loads the last N Q&A pairs of a Cognee session (`GET /api/v1/sessions/{id}`) and stores each turn as a `qa` session entry (`POST /api/v1/remember/entry`), so agent conversations become cognified, searchable memory. Declares `n8n.aiNodeSdkVersion: 1`; the sub-node requires n8n ≥ 2.16.
+- **0.7.0**: Add the **Cognee Memory** sub-node for the AI Agent's Memory port, built on `@n8n/ai-node-sdk`: loads the last N Q&A pairs of a Cognee session (`GET /api/v1/sessions/{id}`) and stores each turn as a `qa` session entry (`POST /api/v1/remember/entry`), so the conversation survives restarts and is readable from any Cognee client. Session entries stay in the session cache, separate from a dataset's knowledge graph. Declares `n8n.aiNodeSdkVersion: 1`; the sub-node requires n8n ≥ 2.16.
 - **0.6.0**: Add the **Dataset** resource (Get Many, Create, Get Data Items, Get Status, Get Progress) and **Session** resource (Get Many, Get); Memify under Cognify; Update under Memory; Get Many and Delete Skill under Skill. Dataset ID fields become dropdowns loaded from your datasets. Add the **Memory** resource: Remember (text or binary file, multipart), Remember Entry (qa / trace / feedback session entries), Recall (all search types plus Auto routing, session scope, Simplify output) and Forget (dataset, data item, memory-only, or everything behind a confirmation toggle). Move Add Data, Cognify, Search and Delete to the `/api/v1` endpoints (the legacy `/api/add_text`, `/api/cognify`, `/api/search` routes are no longer served). Add Data now uploads text as multipart file parts and gains Node Set / Run in Background. Search exposes all Cognee search types plus Dataset IDs, System Prompt, Only Context, Node Sets, Session ID, Include References and Verbose. Cognify gains Dataset IDs, Custom Prompt, Chunk Size and Ontology Keys. Icons now have light/dark variants; toolchain upgraded to `@n8n/node-cli` 0.46 with vitest unit tests. Recall and Remember close topoteretes/cognee#3560.
 
 - **0.5.0**: Add the **Skill** resource (self-improving skill loop) targeting the `/api/v1` API: Ingest Skill, Review Skill (agentic), Propose Improvement, Apply Improvement, Get Skill, Get Proposal. Existing Add/Cognify/Search/Delete operations are unchanged.
