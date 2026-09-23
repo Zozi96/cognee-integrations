@@ -21,7 +21,9 @@ Decision (``resolve_observer``), in order:
 * ``COGNEE_LLM_OBSERVER=false`` → off.
 * cloud mode → off (the remote server owns its LLM key).
 * ``auto`` (default) and an ``LLM_API_KEY`` or an explicit ``LLM_PROVIDER`` is
-  configured → off: the user chose a provider, respect it.
+  configured → off: the user chose a provider, respect it. That includes one in
+  the ``.env`` the server itself loads (``server_dotenv_path``), which overrides
+  anything this process exports.
 * no ``claude`` executable reachable → off (``true`` surfaces this as an error).
 * otherwise → on.
 
@@ -35,11 +37,13 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -56,7 +60,8 @@ ACTIVE_ENV_FLAG = "COGNEE_LLM_OBSERVER_ACTIVE"
 #: the real Claude model (``COGNEE_OBSERVER_MODEL``).
 MODEL_ALIAS = "claude-observer"
 COGNEE_MODEL = f"openai/{MODEL_ALIAS}"
-#: A key must be non-empty for cognee's config validation; the shim ignores it.
+#: What older builds wrote as ``LLM_API_KEY``; still recognised as ours, never a
+#: user key. The key cognee sends is now the shim's bearer token (``observer_token``).
 PLACEHOLDER_KEY = "cognee-observer"
 DEFAULT_PORT = 8017
 DEFAULT_CLAUDE_MODEL = "haiku"
@@ -68,7 +73,14 @@ DEFAULT_EMBEDDING_DIMENSIONS = "384"
 _STATE_DIR = Path.home() / ".cognee-plugin" / "observer"
 PIDFILE = _STATE_DIR / "observer.pid"
 LOG_FILE = _STATE_DIR / "observer.log"
+#: Bearer token the shim requires on every request but ``/health``. It is stable
+#: across launches (created once, mode 0600) rather than per launch: the shim and
+#: the cognee server are shared by every session and restart independently, and a
+#: server booted with an older token would otherwise be locked out of a new shim.
+TOKEN_FILE = _STATE_DIR / "token"
 _SCRIPT = Path(__file__).resolve().parent / "claude-observer.py"
+#: The venv the local server runs from (``_plugin_common._VENV_DIR``).
+_SERVER_VENV = Path.home() / ".cognee-plugin" / "venv"
 
 _FALSE = {"0", "false", "no", "off"}
 _TRUE = {"1", "true", "yes", "on"}
@@ -131,9 +143,93 @@ def find_claude() -> str:
     return ""
 
 
+def observer_token(create: bool = True) -> str:
+    """The shim's bearer token ('' when absent and ``create`` is False). Never raises."""
+    try:
+        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token or not create:
+            return token
+    except FileNotFoundError:
+        if not create:
+            return ""
+    except OSError:
+        return ""
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(TOKEN_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Lost a creation race (or the file was empty): whoever won wrote it.
+        try:
+            return TOKEN_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    except OSError:
+        return ""
+    token = secrets.token_urlsafe(32)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token)
+    return token
+
+
+def _auth_headers() -> dict:
+    token = observer_token(create=False)
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _is_observer_key(key: str) -> bool:
+    return key == PLACEHOLDER_KEY or (bool(key) and key == observer_token(create=False))
+
+
 def llm_key_configured() -> bool:
     key = os.environ.get("LLM_API_KEY", "").strip()
-    return bool(key) and key != PLACEHOLDER_KEY
+    return bool(key) and not _is_observer_key(key)
+
+
+def server_dotenv_path() -> Path | None:
+    """The ``.env`` the local cognee server will load, if any.
+
+    ``import cognee`` runs ``dotenv.load_dotenv(override=True)``, whose
+    ``find_dotenv`` walks up from the cognee package directory and takes the
+    first ``.env`` it finds: inside the venv, then ``~/.cognee-plugin``, ``~``,
+    and so on to the root. Because of ``override=True`` its values beat the
+    environment the server was spawned with, so a key there is the one the
+    server uses even though this process never sees it.
+    """
+    start = _SERVER_VENV
+    for pattern in ("lib/python*/site-packages/cognee", "Lib/site-packages/cognee"):
+        found = sorted(_SERVER_VENV.glob(pattern))
+        if found:
+            start = found[-1]
+            break
+    try:
+        current = start.resolve()
+    except OSError:
+        current = start
+    for directory in (current, *current.parents):
+        candidate = directory / ".env"
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def server_dotenv_values() -> dict:
+    path = server_dotenv_path()
+    if path is None:
+        return {}
+    try:
+        from _env_file import parse_env_file
+
+        return parse_env_file(path)
+    except Exception:
+        return {}
+
+
+def _is_local_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host in ("localhost", "::1", "0.0.0.0") or host.startswith("127.")
 
 
 def llm_provider_configured() -> bool:
@@ -168,9 +264,10 @@ def resolve_observer(config: dict | None = None) -> dict:
     if mode == "false":
         result["reason"] = "disabled"
         return result
-    cloud = bool(str(config.get("base_url") or "").strip()) or (
-        config.get("_forced_backend") == "cloud"
-    )
+    # SessionStart fills ``base_url`` with the local server's URL before asking,
+    # so only a non-loopback URL (or the forced cloud backend) means cloud.
+    base = str(config.get("base_url") or "").strip()
+    cloud = (bool(base) and not _is_local_url(base)) or (config.get("_forced_backend") == "cloud")
     if cloud:
         result["reason"] = "cloud_mode"
         return result
@@ -185,6 +282,14 @@ def resolve_observer(config: dict | None = None) -> dict:
                 return result
             if llm_provider_configured():
                 result["reason"] = "llm_provider_configured"
+                return result
+            dotenv = server_dotenv_values()
+            dotenv_key = str(dotenv.get("LLM_API_KEY") or "").strip()
+            if (dotenv_key and not _is_observer_key(dotenv_key)) or str(
+                dotenv.get("LLM_PROVIDER") or ""
+            ).strip():
+                result["reason"] = "server_dotenv_configured"
+                result["dotenv"] = str(server_dotenv_path() or "")
                 return result
     if not result["claude"]:
         result["reason"] = "claude_cli_missing"
@@ -214,7 +319,8 @@ def apply_observer_env(decision: dict) -> dict:
         "LLM_PROVIDER": "custom",
         "LLM_MODEL": COGNEE_MODEL,
         "LLM_ENDPOINT": decision.get("endpoint") or (base_url() + "/v1"),
-        "LLM_API_KEY": PLACEHOLDER_KEY,
+        # The shim's bearer token: litellm sends it as ``Authorization: Bearer``.
+        "LLM_API_KEY": observer_token() or PLACEHOLDER_KEY,
         ACTIVE_ENV_FLAG: "1",
     }
     for key, value in applied.items():
@@ -259,7 +365,8 @@ def is_active() -> bool:
 
 def _http_get(url: str, timeout: float) -> tuple[int, dict]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        req = urllib.request.Request(url, headers=_auth_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             return resp.status, (json.loads(body) if body else {})
     except urllib.error.HTTPError as exc:
@@ -336,6 +443,7 @@ def ensure_observer_running(
         log_fh = LOG_FILE.open("a", encoding="utf-8")
     except Exception:
         log_fh = subprocess.DEVNULL
+    observer_token()  # the shim reads it at start; make sure it exists first
     env = os.environ.copy()
     if decision.get("claude"):
         env["COGNEE_OBSERVER_CLAUDE"] = str(decision["claude"])
@@ -372,7 +480,7 @@ def stop_observer(port_number: int | None = None) -> bool:
     """Ask a running shim to exit (``POST /v1/observer/shutdown``), else SIGTERM the pidfile."""
     url = base_url(port_number) + "/v1/observer/shutdown"
     try:
-        req = urllib.request.Request(url, data=b"{}", method="POST")
+        req = urllib.request.Request(url, data=b"{}", method="POST", headers=_auth_headers())
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=2.0):
             return True
@@ -404,6 +512,34 @@ def describe(decision: dict | None = None) -> str:
         "cloud_mode": "off (cloud mode: the remote server owns its LLM key)",
         "llm_key_configured": "off (LLM_API_KEY is configured)",
         "llm_provider_configured": "off (LLM_PROVIDER is configured)",
+        "server_dotenv_configured": (
+            f"off (the server's {decision.get('dotenv') or '.env'} configures its LLM)"
+        ),
         "claude_cli_missing": "unavailable (no `claude` executable found)",
     }
     return reasons.get(str(decision.get("reason") or ""), "off")
+
+
+#: Shown whenever the observer serves a launch (session start, doctor, README).
+SPEND_WARNING = (
+    "Cognee's cognify/improve calls run on your Claude subscription through "
+    "`claude -p` and count against your Claude usage limits. Building the graph "
+    "is token-heavy."
+)
+#: Embedding vectors from different models cannot be compared, so a dataset is
+#: tied to the embedder that built it.
+EMBEDDING_WARNING = (
+    "Embeddings: {provider} ({model}, {dims} dims). A dataset built "
+    "with one embedding model cannot be searched with another: if you later set "
+    "LLM_API_KEY or change EMBEDDING_*, switch to a new dataset "
+    "(/cognee-memory:cognee-switch-datasets or COGNEE_PLUGIN_DATASET) instead of "
+    "reusing this one."
+)
+
+
+def embedding_warning() -> str:
+    return EMBEDDING_WARNING.format(
+        provider=os.environ.get("EMBEDDING_PROVIDER") or "fastembed",
+        model=os.environ.get("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL,
+        dims=os.environ.get("EMBEDDING_DIMENSIONS") or DEFAULT_EMBEDDING_DIMENSIONS,
+    )

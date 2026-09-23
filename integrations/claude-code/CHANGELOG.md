@@ -34,7 +34,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `COGNEE_LLM_OBSERVER` (`auto`|`true`|`false`), `COGNEE_OBSERVER_MODEL` (`haiku`),
   `COGNEE_OBSERVER_CLAUDE`, `COGNEE_OBSERVER_PORT`, `COGNEE_OBSERVER_CONCURRENCY`,
   `COGNEE_OBSERVER_TIMEOUT`. Setting `LLM_API_KEY` switches back on the next launch;
-  cloud mode never uses it.
+  cloud mode never uses it. Session start and `doctor.py` warn every time it is in use
+  that the calls spend the Claude subscription's usage, and that a dataset is tied to
+  its embedder (switch datasets when switching between the observer and a key). A key
+  or provider in the `.env` the server itself loads keeps `auto` off. The shim requires
+  a bearer token (`~/.cognee-plugin/observer/token`, handed to cognee as its
+  `LLM_API_KEY`) and refuses requests with an `Origin` header; its `claude` child drops
+  only the parent session's variables (keeping `CLAUDE_CODE_OAUTH_TOKEN` and
+  Bedrock/Vertex settings) plus `ANTHROPIC_API_KEY`. The server pidfile records whether
+  the server booted on the observer, so a session joining a running server follows the
+  config it actually has.
 - **File-scoped context on `Read` (`PreToolUse`).** A new hook, `file-context.py`,
   runs before every `Read` of a source file inside an indexed repository and injects
   what the code graph knows about that file as `additionalContext`: symbols grouped by

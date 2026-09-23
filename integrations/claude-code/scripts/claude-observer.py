@@ -23,7 +23,10 @@ Usage:
     claude-observer.py serve [--port N] [--cognee-url URL]
     claude-observer.py start | stop | status | probe
 
-Endpoints:
+Endpoints (all but ``/health`` need ``Authorization: Bearer <token>``, the
+token in ``~/.cognee-plugin/observer/token`` that cognee gets as its
+``LLM_API_KEY``; any request carrying an ``Origin`` header is refused, so a web
+page cannot drive the shim):
     GET  /health                  liveness + a few counters
     GET  /v1/models
     POST /v1/chat/completions     (stream: true answered as a single SSE chunk)
@@ -39,6 +42,7 @@ when its last agent disconnects), so nothing lingers after the last session.
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import re
@@ -214,22 +218,46 @@ def classify_failure(text: str) -> int:
     return 502
 
 
+#: Variables that tie a process to the Claude Code session that launched it. A
+#: child inheriting them may refuse to start ("cannot run inside Claude Code"),
+#: attach to the parent's session or resolve the parent's plugin root.
+_PARENT_SESSION_ENV = frozenset(
+    {
+        "CLAUDECODE",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+        "CLAUDE_ENV_FILE",
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_PLUGIN_ROOT",
+        "CLAUDE_PLUGIN_DATA",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_SSE_PORT",
+        "CLAUDE_CODE_CHILD_SESSION",
+    }
+)
+_PARENT_SESSION_PREFIXES = ("CLAUDE_CODE_SESSION_", "CLAUDE_CODE_MESSAGING_")
+#: Would make the child bill an API key instead of the subscription the
+#: observer promises.
+_BILLING_ENV = frozenset({"ANTHROPIC_API_KEY"})
+
+
 def child_env() -> dict:
     """Environment for the ``claude`` child: no trace of the parent Claude session.
 
-    Claude Code exports ``CLAUDECODE`` / ``CLAUDE_*`` into hooks; a child that
-    inherits them may refuse to start ("cannot run inside Claude Code") or
-    resolve the parent's plugin root. ``CLAUDE_CONFIG_DIR`` is the one to keep —
-    it is where the credentials live.
+    Only the parent-session variables are dropped. Everything else Claude Code
+    needs to authenticate stays: ``CLAUDE_CONFIG_DIR`` (where the credentials
+    live), ``CLAUDE_CODE_OAUTH_TOKEN`` (``claude setup-token`` logins) and the
+    Bedrock/Vertex switches. ``ANTHROPIC_API_KEY`` is dropped so a key in the
+    user's shell cannot quietly move the bill off the subscription.
     """
-    env = {}
-    for key, value in os.environ.items():
-        if key == "CLAUDE_CONFIG_DIR":
-            env[key] = value
-            continue
-        if key.startswith("CLAUDE"):
-            continue
-        env[key] = value
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _PARENT_SESSION_ENV
+        and key not in _BILLING_ENV
+        and not key.startswith(_PARENT_SESSION_PREFIXES)
+    }
     env[_observer.CHILD_ENV_FLAG] = "1"
     return env
 
@@ -446,8 +474,9 @@ def complete(body: dict, *, claude: str, timeout: float = _CALL_TIMEOUT) -> dict
 
 
 class State:
-    def __init__(self, claude: str, cognee_url: str):
+    def __init__(self, claude: str, cognee_url: str, token: str = ""):
         self.claude = claude
+        self.token = token
         self.cognee_url = cognee_url.rstrip("/")
         self.started = time.time()
         self.gate = threading.BoundedSemaphore(_CONCURRENCY)
@@ -559,10 +588,28 @@ class Handler(BaseHTTPRequestHandler):
                 params[part] = "1"
         return path.rstrip("/") or "/", params
 
+    def _authorized(self, path: str) -> bool:
+        """Refuse browser-originated requests outright, and anything but ``/health``
+        without the bearer token. Sends the error response when refusing."""
+        if self.headers.get("Origin"):
+            self._send_error(403, "cross-origin requests are not accepted", "forbidden")
+            return False
+        if path == "/health":
+            return True
+        header = str(self.headers.get("Authorization") or "")
+        scheme, _, supplied = header.partition(" ")
+        token = self.state.token
+        if token and scheme.lower() == "bearer" and hmac.compare_digest(supplied.strip(), token):
+            return True
+        self._send_error(401, "missing or invalid observer token", "unauthorized")
+        return False
+
     # -- routes
     def do_GET(self):
         path, params = self._path()
         state = self.state
+        if not self._authorized(path):
+            return
         if path == "/health":
             with state.lock:
                 self._send_json(
@@ -609,6 +656,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path, _ = self._path()
         state = self.state
+        if not self._authorized(path):
+            return
         try:
             if path == "/v1/observer/shutdown":
                 self._send_json(200, {"status": "stopping"})
@@ -722,7 +771,11 @@ def serve(port: int, cognee_url: str) -> int:
         print("claude-observer: no `claude` executable found", file=sys.stderr)
         return 2
     _observer._STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state = State(claude, cognee_url)
+    token = _observer.observer_token()
+    if not token:
+        print("claude-observer: cannot create the observer token", file=sys.stderr)
+        return 1
+    state = State(claude, cognee_url, token)
     Handler.state = state
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)

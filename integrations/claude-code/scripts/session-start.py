@@ -743,7 +743,12 @@ def _ensure_local_server_running(
             pump.stdin.close()  # the server holds the write end now
         # Presence evidence for future boot points: covers the spawn-to-bind
         # window where neither the health probe nor the TCP listener sees it.
-        write_server_pidfile(port, server_proc.pid, version=_PINNED_COGNEE_VERSION)
+        write_server_pidfile(
+            port,
+            server_proc.pid,
+            version=_PINNED_COGNEE_VERSION,
+            llm_observer=server_env.get("COGNEE_LLM_OBSERVER_ACTIVE", "") == "1",
+        )
 
         health_deadline = time.monotonic() + health_timeout
         while time.monotonic() < health_deadline:
@@ -1792,26 +1797,69 @@ async def _run_bootstrap(bootstrap: dict) -> None:
         hook_log("bootstrap_failed", {"error": str(exc)[:300]})
 
 
+def _running_server_observer(target_url: str) -> tuple[bool, bool | None]:
+    """(a local server is already up, whether it was spawned with the observer).
+
+    The second value is None when that is unknown: a server booted by another
+    integration or an older build, or one this plugin did not spawn at all.
+    """
+    if not target_url or not _is_local_url(target_url):
+        return False, None
+    try:
+        from _plugin_common import live_server_record
+
+        port = urllib.parse.urlparse(target_url).port or 80
+        record = live_server_record(port)
+    except Exception:
+        record = {}
+    if record:
+        stamp = record.get("llm_observer")
+        return True, (bool(stamp) if isinstance(stamp, bool) else None)
+    return _health_ok(_health_url(target_url), timeout=1.0), None
+
+
 def _apply_observer(config: dict, target_url: str) -> dict:
     """Decide the Claude observer for this launch, apply its env, start the shim.
 
     Returns the decision (``_observer.resolve_observer``) extended with
-    ``shim_running``. Never raises: the observer is a convenience over the
-    regular local mode, and a failure here must leave that mode intact —
-    except under ``COGNEE_LLM_OBSERVER=true``, whose refusal is recorded so
-    the user learns why the server has no LLM.
+    ``shim_running``, ``server_running`` and ``server_observer``. Never raises:
+    the observer is a convenience over the regular local mode, and a failure
+    here must leave that mode intact — except under ``COGNEE_LLM_OBSERVER=true``,
+    whose refusal is recorded so the user learns why the server has no LLM.
+
+    The environment only reaches a server this launch spawns. When one is
+    already running, its own boot-time config is what serves cognify, so that —
+    not this launch's decision — sets ``active``: a server booted on the
+    observer keeps needing the shim even after the user adds a key, and one
+    booted with a key ignores the observer until it restarts.
     """
     try:
         from _observer import apply_observer_env, ensure_observer_running, resolve_observer
 
         decision = resolve_observer(config)
+        server_running, server_observer = _running_server_observer(target_url)
+        decision["wanted"] = bool(decision.get("active"))
+        decision["server_running"] = server_running
+        decision["server_observer"] = server_observer
+        if server_running and server_observer is not None:
+            decision["active"] = server_observer
         if decision.get("error"):
             hook_log("observer_refused", {"error": decision["error"]})
         if not decision.get("active"):
             hook_log(
                 "observer_skipped",
-                {"reason": decision.get("reason", ""), "setting": decision.get("setting", "")},
+                {
+                    "reason": decision.get("reason", ""),
+                    "setting": decision.get("setting", ""),
+                    "server_running": server_running,
+                    "server_observer": server_observer,
+                },
             )
+            decision["shim_running"] = False
+            return decision
+        if not decision.get("claude"):
+            # A running observer server this launch would not have chosen (the
+            # CLI is gone): nothing to start, but say what the server expects.
             decision["shim_running"] = False
             return decision
         applied = apply_observer_env(decision)
@@ -1826,6 +1874,8 @@ def _apply_observer(config: dict, target_url: str) -> dict:
                 "embedding": os.environ.get("EMBEDDING_PROVIDER", ""),
                 "applied": sorted(applied),
                 "shim_running": running,
+                "server_running": server_running,
+                "server_observer": server_observer,
             },
         )
         if not running:
@@ -1857,25 +1907,66 @@ def _record_observer(decision: dict) -> None:
         hook_log("observer_record_failed", {"error": str(exc)[:200]})
 
 
-def _with_observer_note(output: dict, observer: dict) -> dict:
-    """Tell the user (systemMessage) when the server's LLM is the Claude subscription,
-    or why a requested observer could not be honoured."""
-    note = ""
-    if observer.get("active"):
-        note = (
-            "LLM: Claude Code (observer) — the local server's cognify/improve calls run on "
-            f"your Claude subscription via `claude -p` (model {observer.get('model')}); "
-            "embeddings run locally on fastembed. No LLM_API_KEY needed. "
-            "Set LLM_API_KEY in ~/.cognee/.env to use a provider of your own instead, "
-            "or COGNEE_LLM_OBSERVER=false to turn this off."
+def _observer_note(observer: dict) -> str:
+    """The SessionStart systemMessage line about the observer, or ''."""
+    from _observer import SPEND_WARNING, embedding_warning
+
+    active = bool(observer.get("active"))
+    wanted = bool(observer.get("wanted", active))
+    server_running = bool(observer.get("server_running"))
+    server_observer = observer.get("server_observer")
+    restart = (
+        "It keeps that config until it restarts (it stops on its own once every "
+        "session using it has closed)."
+    )
+    if wanted and server_running and server_observer is None:
+        # Nothing records how this server booted (another integration, an older
+        # build, or a server started outside the plugin). The env this launch
+        # applied does not reach it, so do not claim the observer serves it.
+        return (
+            "Cognee Memory: a Cognee server was already running and it is unknown which "
+            "LLM it was started with, so the Claude observer may not be serving it. If it "
+            f"is, cognify/improve use your Claude subscription. {restart}"
         )
+    if active:
+        lines = [
+            f"⚠ LLM: Claude Code (observer), model {observer.get('model')}. {SPEND_WARNING}",
+            embedding_warning(),
+        ]
+        if server_running and server_observer is True and not wanted:
+            lines.append(
+                "The running Cognee server was started on the observer, so it still uses "
+                f"your subscription although this session would not have chosen it. {restart}"
+            )
+        else:
+            lines.append(
+                "To use a provider key instead, set LLM_API_KEY in ~/.cognee/.env; "
+                "COGNEE_LLM_OBSERVER=false turns the observer off."
+            )
         if not observer.get("shim_running"):
-            note += (
-                " Warning: the observer shim did not start — check "
+            lines.append(
+                "Warning: the observer shim is not running — check "
                 "~/.cognee-plugin/observer/observer.log; the server has no LLM until it runs."
             )
-    elif observer.get("error"):
-        note = f"Cognee Memory: {observer['error']}"
+        return "\n".join(lines)
+    if wanted and server_running and server_observer is False:
+        return (
+            "Cognee Memory: the Claude observer was not applied — the running Cognee "
+            f"server was started with its own LLM config. {restart}"
+        )
+    if observer.get("error"):
+        return f"Cognee Memory: {observer['error']}"
+    return ""
+
+
+def _with_observer_note(output: dict, observer: dict) -> dict:
+    """Tell the user (systemMessage) when the server's LLM is the Claude subscription,
+    what that costs, or why a requested observer could not be honoured."""
+    try:
+        note = _observer_note(observer)
+    except Exception as exc:
+        hook_log("observer_note_failed", {"error": str(exc)[:200]})
+        note = ""
     if not note:
         return output
     result = dict(output or {})

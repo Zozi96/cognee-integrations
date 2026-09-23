@@ -23,10 +23,13 @@ import pytest
 
 
 @pytest.fixture
-def observer(suite, isolated_modules):
+def observer(suite, isolated_modules, monkeypatch):
     if suite.name != "claude-code":
         pytest.skip(f"{suite.name}: the Claude observer is a Claude Code feature")
-    return isolated_modules(suite, "_observer")
+    module = isolated_modules(suite, "_observer")
+    # The isolation env turns the observer off for every other test.
+    monkeypatch.delenv("COGNEE_LLM_OBSERVER", raising=False)
+    return module
 
 
 @pytest.fixture
@@ -76,6 +79,44 @@ def test_cloud_mode_never_runs_the_observer(observer, fake_claude):
     assert observer.resolve_observer({"_forced_backend": "cloud"})["reason"] == "cloud_mode"
 
 
+@pytest.mark.parametrize(
+    "url", ["http://localhost:8011", "http://127.0.0.1:8011", "http://[::1]:8011"]
+)
+def test_local_base_url_is_not_cloud(observer, fake_claude, url):
+    """SessionStart fills base_url with the local server's URL before deciding."""
+    assert observer.resolve_observer({"base_url": url})["active"] is True
+
+
+def test_auto_yields_to_a_key_in_the_servers_dotenv(observer, fake_claude, temp_home):
+    """cognee's load_dotenv(override=True) makes that key the server's, unseen here."""
+    (temp_home / ".cognee-plugin" / "venv").mkdir(parents=True, exist_ok=True)
+    dotenv = temp_home / ".cognee-plugin" / ".env"
+    dotenv.write_text('LLM_API_KEY="sk-in-dotenv"\n', encoding="utf-8")
+    decision = observer.resolve_observer({})
+    assert decision["active"] is False
+    assert decision["reason"] == "server_dotenv_configured"
+    assert decision["dotenv"] == str(dotenv.resolve())
+    assert "server's" in observer.describe(decision)
+
+
+def test_server_dotenv_with_our_own_key_does_not_count(observer, fake_claude, temp_home):
+    (temp_home / ".cognee-plugin" / "venv").mkdir(parents=True, exist_ok=True)
+    token = observer.observer_token()
+    (temp_home / ".cognee-plugin" / ".env").write_text(
+        f"LLM_API_KEY={token}\nEMBEDDING_PROVIDER=fastembed\n", encoding="utf-8"
+    )
+    assert observer.resolve_observer({})["active"] is True
+
+
+def test_token_is_created_once_and_private(observer):
+    token = observer.observer_token()
+    assert len(token) >= 32
+    assert observer.observer_token() == token
+    assert observer.observer_token(create=False) == token
+    if os.name != "nt":
+        assert stat.S_IMODE(observer.TOKEN_FILE.stat().st_mode) == 0o600
+
+
 def test_disabled_is_final(observer, fake_claude, monkeypatch):
     monkeypatch.setenv("COGNEE_LLM_OBSERVER", "false")
     decision = observer.resolve_observer({})
@@ -123,7 +164,8 @@ def test_apply_points_cognee_at_the_shim(observer, fake_claude, monkeypatch):
     assert os.environ["LLM_PROVIDER"] == "custom"
     assert os.environ["LLM_MODEL"] == observer.COGNEE_MODEL == "openai/" + observer.MODEL_ALIAS
     assert os.environ["LLM_ENDPOINT"] == "http://127.0.0.1:8123/v1"
-    assert os.environ["LLM_API_KEY"] == observer.PLACEHOLDER_KEY
+    # cognee's LLM_API_KEY is the shim's bearer token, not a guessable constant.
+    assert os.environ["LLM_API_KEY"] == observer.observer_token(create=False) != ""
     assert os.environ[observer.ACTIVE_ENV_FLAG] == "1"
     # Embeddings default to a local model — the observer cannot embed.
     assert os.environ["EMBEDDING_PROVIDER"] == "fastembed"
@@ -241,16 +283,43 @@ def test_failure_classification(shim, text, status):
 
 
 def test_child_env_drops_the_parent_claude_session(shim, observer, monkeypatch):
-    monkeypatch.setenv("CLAUDECODE", "1")
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plugins/cognee")
+    for key in (
+        "CLAUDECODE",
+        "CLAUDE_PLUGIN_ROOT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_PID",
+    ):
+        monkeypatch.setenv(key, "parent")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/home/u/.claude")
     monkeypatch.setenv("PATH", "/usr/bin")
     env = shim.child_env()
-    assert "CLAUDECODE" not in env
-    assert "CLAUDE_PLUGIN_ROOT" not in env
+    for key in (
+        "CLAUDECODE",
+        "CLAUDE_PLUGIN_ROOT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_PID",
+    ):
+        assert key not in env
     assert env["CLAUDE_CONFIG_DIR"] == "/home/u/.claude"  # credentials live here
     assert env[observer.CHILD_ENV_FLAG] == "1"
     assert env["PATH"] == "/usr/bin"
+
+
+def test_child_env_keeps_auth_and_drops_the_api_key(shim, monkeypatch):
+    """Token logins and Bedrock/Vertex must work; an API key must not move the bill."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-x")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-x")
+    env = shim.child_env()
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-x"
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    assert env["CLAUDE_CODE_USE_VERTEX"] == "1"
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 def test_complete_returns_structured_output_as_content(shim, monkeypatch):
@@ -358,6 +427,118 @@ def test_forced_tool_becomes_a_tool_call(shim, monkeypatch):
     call = choice["message"]["tool_calls"][0]["function"]
     assert call["name"] == "extract"
     assert json.loads(call["arguments"]) == {"q": "x"}
+
+
+# ── the shim's access control ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def live_shim(shim, observer):
+    """The real HTTP handler on an ephemeral loopback port (no `claude` is run)."""
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    token = observer.observer_token()
+    shim.Handler.state = shim.State("/bin/claude", "", token)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), shim.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}", token
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _request(url, *, headers=None, data=None):
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, data=data, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def test_shim_requires_the_token(live_shim):
+    base, token = live_shim
+    assert _request(base + "/v1/models") == 401
+    assert _request(base + "/v1/models", headers={"Authorization": "Bearer wrong"}) == 401
+    assert _request(base + "/v1/models", headers={"Authorization": f"Bearer {token}"}) == 200
+    assert _request(base + "/v1/chat/completions", data=b"{}") == 401
+    assert _request(base + "/v1/observer/shutdown", data=b"{}") == 401
+    assert _request(base + "/health") == 200  # liveness stays open
+
+
+def test_shim_refuses_browser_requests(live_shim):
+    """A page can POST to loopback without CORS; a token-less one gets nothing, and
+    even a request carrying the token is refused once it comes with an Origin."""
+    base, token = live_shim
+    origin = {"Origin": "https://evil.example", "Content-Type": "text/plain"}
+    assert _request(base + "/v1/chat/completions", headers=origin, data=b"{}") == 403
+    assert _request(base + "/health", headers=origin) == 403
+    assert (
+        _request(base + "/v1/models", headers={**origin, "Authorization": f"Bearer {token}"}) == 403
+    )
+
+
+def test_client_helpers_send_the_token(live_shim, observer, monkeypatch):
+    base, _ = live_shim
+    port = int(base.rsplit(":", 1)[1])
+    assert observer.observer_alive(port)
+    status, _ = observer._http_get(base + "/v1/models", timeout=5)
+    assert status == 200
+
+
+# ── session start: the note and a server that is already running ─────────────
+
+
+@pytest.fixture
+def session_start(suite, hook_module, observer, monkeypatch):
+    module = hook_module(suite, "session-start.py")
+    monkeypatch.delenv("COGNEE_LLM_OBSERVER", raising=False)  # re-isolated by the load
+    return module
+
+
+def _decide(session_start, monkeypatch, *, running, stamp):
+    monkeypatch.setattr(session_start, "_running_server_observer", lambda url: (running, stamp))
+    import _observer as obs
+
+    monkeypatch.setattr(obs, "ensure_observer_running", lambda *a, **k: True)
+    return session_start._apply_observer(
+        {"base_url": "http://localhost:8011"}, "http://localhost:8011"
+    )
+
+
+def test_note_warns_about_spend_and_embeddings(session_start, fake_claude, monkeypatch):
+    decision = _decide(session_start, monkeypatch, running=False, stamp=None)
+    assert decision["active"] is True
+    note = session_start._observer_note(decision)
+    assert "Claude subscription" in note and "usage limits" in note
+    assert "switch to a new dataset" in note
+
+
+def test_running_keyed_server_is_not_claimed(session_start, fake_claude, monkeypatch):
+    decision = _decide(session_start, monkeypatch, running=True, stamp=False)
+    assert decision["active"] is False
+    assert os.environ.get("LLM_PROVIDER") != "custom"  # env left alone
+    assert "not applied" in session_start._observer_note(decision)
+
+
+def test_running_observer_server_is_followed_even_with_a_key(
+    session_start, fake_claude, monkeypatch
+):
+    monkeypatch.setenv("LLM_API_KEY", "sk-real")
+    decision = _decide(session_start, monkeypatch, running=True, stamp=True)
+    assert decision["active"] is True and decision["wanted"] is False
+    note = session_start._observer_note(decision)
+    assert "still uses your subscription" in note
+
+
+def test_running_server_of_unknown_origin_is_not_claimed(session_start, fake_claude, monkeypatch):
+    decision = _decide(session_start, monkeypatch, running=True, stamp=None)
+    note = session_start._observer_note(decision)
+    assert "unknown which LLM" in note
+    assert not note.startswith("⚠ LLM: Claude Code")
 
 
 # ── the idle watcher asks the shim, not litellm ──────────────────────────────

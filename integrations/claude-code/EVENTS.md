@@ -158,6 +158,7 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:observer_applied` | `observer.applied` |
 | `hook:observer_error` | `observer.error` |
 | `hook:observer_record_failed` | `observer.record_failed` |
+| `hook:observer_note_failed` | `observer.note_failed` |
 | `hook:observer_refused` | `observer.refused` |
 | `hook:observer_shim_start_failed` | `observer.shim_start_failed` |
 | `hook:observer_skipped` | `observer.skipped` |

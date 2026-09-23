@@ -2894,20 +2894,38 @@ def _server_pidfile(port: int) -> Path:
     return _SHARED_PLUGIN_ROOT / f"server-{int(port)}.pid"
 
 
-def write_server_pidfile(port: int, pid: int, version: str = "") -> None:
-    """Record the uvicorn server spawned on ``port`` (presence evidence)."""
+def write_server_pidfile(
+    port: int, pid: int, version: str = "", llm_observer: Optional[bool] = None
+) -> None:
+    """Record the uvicorn server spawned on ``port`` (presence evidence).
+
+    ``llm_observer`` records whether the server was spawned with the Claude
+    observer's environment: a server keeps the LLM config it booted with, so a
+    later session joining it must learn which one that was, not assume its own.
+    """
+    record = {
+        "pid": int(pid),
+        "port": int(port),
+        "version": version,
+        "created_at": datetime.now(timezone.utc).timestamp(),
+    }
+    if llm_observer is not None:
+        record["llm_observer"] = bool(llm_observer)
     try:
-        _write_json_file(
-            _server_pidfile(port),
-            {
-                "pid": int(pid),
-                "port": int(port),
-                "version": version,
-                "created_at": datetime.now(timezone.utc).timestamp(),
-            },
-        )
+        _write_json_file(_server_pidfile(port), record)
     except Exception as exc:
         hook_log("server_pidfile_write_failed", {"error": str(exc)[:200]})
+
+
+def live_server_record(port: int) -> dict:
+    """The pidfile record of the live server on ``port``, or {} (none / stale)."""
+    if not _live_server_pid(port):
+        return {}
+    try:
+        record = json.loads(_server_pidfile(port).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return record if isinstance(record, dict) else {}
 
 
 def clear_server_pidfile(port: int) -> None:

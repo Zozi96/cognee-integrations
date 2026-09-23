@@ -495,12 +495,21 @@ user request.
 
 ## Claude observer: local mode on your Claude subscription
 
+> **It spends your Claude usage.** With the observer on, every cognify/improve call the
+> local server makes is a real `claude -p` run billed to your Claude subscription and
+> counted against its usage limits — and building the graph is token-heavy. Session
+> start announces it every time it is in use. Set `LLM_API_KEY` to use a provider of
+> your own, or `COGNEE_LLM_OBSERVER=false` to turn it off.
+
 Local mode needs an LLM for cognify, improve and graph completion. When no
 `LLM_API_KEY` (and no `LLM_PROVIDER`) is configured, session start runs those calls
 through **Claude Code itself** instead of asking for a key:
 
 1. `_observer.py` decides, before the cognee install/boot, that this launch has no LLM
-   of its own and the `claude` CLI is available;
+   of its own and the `claude` CLI is available. "Of its own" includes the `.env` the
+   server itself loads (cognee's `load_dotenv(override=True)` finds the first `.env`
+   walking up from the plugin venv: `~/.cognee-plugin/venv`, `~/.cognee-plugin`, `~`,
+   …): an `LLM_API_KEY` or `LLM_PROVIDER` there keeps the observer off;
 2. it points cognee's `custom` provider at a loopback OpenAI-compatible shim
    (`LLM_PROVIDER=custom`, `LLM_MODEL=openai/claude-observer`,
    `LLM_ENDPOINT=http://127.0.0.1:8017/v1`) and, unless you configured an embedder of
@@ -512,10 +521,31 @@ through **Claude Code itself** instead of asking for a key:
    `--json-schema` carries cognee's structured-output schemas, `--safe-mode` keeps
    your OAuth login but disables hooks, plugins and CLAUDE.md in the child so the
    plugin never re-enters itself (every hook also exits at once when
-   `COGNEE_OBSERVER_CHILD` is set). The shim retires itself a few minutes after the
-   cognee server is gone.
+   `COGNEE_OBSERVER_CHILD` is set). The child keeps your Claude Code login
+   (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock/Vertex settings) but not
+   `ANTHROPIC_API_KEY`, so the calls stay on the subscription. The shim retires itself
+   a few minutes after the cognee server is gone.
 
-Session start says so in its system message (`LLM: Claude Code (observer) …`),
+The shim listens on loopback only and requires a bearer token on every route but
+`/health`: `~/.cognee-plugin/observer/token` (created once, mode 0600), which cognee
+receives as its `LLM_API_KEY`. Requests carrying an `Origin` header are refused, so a
+web page cannot drive it.
+
+A running server keeps the LLM config it booted with. The server's pidfile records
+whether it was started on the observer, and a session joining it follows that record:
+a server booted on the observer keeps the shim running (and keeps using the
+subscription) even after you set a key, until it restarts — it stops on its own once
+every session using it has closed.
+
+**Embeddings and datasets.** Vectors from different embedding models cannot be
+compared, so a dataset is tied to the embedder that built it. Turning the observer on
+switches embeddings to fastembed (384 dims), and turning it off (by setting
+`LLM_API_KEY`) switches them back to your provider's model. Either way, switch to a
+new dataset (`/cognee-memory:cognee-switch-datasets`, or `COGNEE_PLUGIN_DATASET`)
+rather than reusing one built with the other embedder. Session start and `doctor.py`
+repeat this whenever the observer is in use.
+
+Session start says so in its system message (`⚠ LLM: Claude Code (observer) …`),
 `doctor.py` shows it in the `LLM` row, and the status line's key check asks the shim
 instead of litellm: a Claude login problem shows as `✕ (claude_not_logged_in)`, not as
 an incorrect key. The tokens are billed to your Claude subscription (`haiku` by
@@ -529,7 +559,7 @@ the next launch; cloud mode never uses the observer (the remote server owns its 
 
 | Variable | Default | Effect |
 |---|---|---|
-| `COGNEE_LLM_OBSERVER` | `auto` | `auto`: observer when no `LLM_API_KEY`/`LLM_PROVIDER` is configured and `claude` is found. `true`: always (a missing CLI is reported at session start). `false`: never — local mode then needs a key as before. |
+| `COGNEE_LLM_OBSERVER` | `auto` | `auto`: observer when no `LLM_API_KEY`/`LLM_PROVIDER` is configured (in the environment, `~/.cognee/.env` or the server's `.env`) and `claude` is found. `true`: always (a missing CLI is reported at session start). `false`: never — local mode then needs a key as before. |
 | `COGNEE_OBSERVER_MODEL` | `haiku` | Claude model for the server's LLM calls (`haiku`, `sonnet`, `opus`, or a full model id). |
 | `COGNEE_OBSERVER_CLAUDE` | found on PATH | Path to the `claude` executable. |
 | `COGNEE_OBSERVER_PORT` | `8017` | Loopback port of the shim. |

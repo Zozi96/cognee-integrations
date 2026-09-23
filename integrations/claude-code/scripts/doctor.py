@@ -252,10 +252,12 @@ def _resolve_llm() -> str:
     except Exception as exc:
         return f"Unknown ({str(exc)[:80]})"
     if decision.get("active"):
+        from _observer import SPEND_WARNING, embedding_warning
+
         shim = "shim running" if observer_alive(decision.get("port")) else "shim not running"
         return (
             f"Claude Code observer (`claude -p`, model {decision.get('model')}, "
-            f"{decision.get('endpoint')}, {shim}); embeddings on fastembed"
+            f"{decision.get('endpoint')}, {shim}). {SPEND_WARNING} {embedding_warning()}"
         )
     if decision.get("error"):
         return f"None — {decision['error']}"
@@ -264,6 +266,8 @@ def _resolve_llm() -> str:
         provider = (os.environ.get("LLM_PROVIDER") or "").strip() or "openai (default)"
         model = (os.environ.get("LLM_MODEL") or "").strip() or "Default"
         return f"Configured provider ({provider}, model {model})"
+    if reason == "server_dotenv_configured":
+        return f"Configured provider (in the server's {decision.get('dotenv') or '.env'})"
     if reason == "claude_cli_missing":
         return "None — no LLM_API_KEY and no `claude` executable for the observer"
     if reason == "disabled":
