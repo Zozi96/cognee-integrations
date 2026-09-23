@@ -196,29 +196,6 @@ def _format_entry(entry: dict) -> str:
     return "\n".join(lines)
 
 
-def _count_cross_session_hits(by_source: dict, session_id: str) -> int:
-    """How many injected results came from outside this session.
-
-    The session, trace and agent-guidance scopes are queried by ``session_id``,
-    so everything they return is this session's own. Only the knowledge graph
-    reaches across sessions: the bridge stamps every synced session document
-    with a ``Session ID: <id>`` header (and distilled learnings keep the id in
-    their heading), so a graph passage that does not mention the current id
-    came from an earlier session — or from a ``remember``-ed document, which is
-    knowledge this conversation never produced either. That is the number the
-    status line shows as ``N from past sessions``: what memory contributed that
-    Claude could not have known from this conversation alone.
-    """
-    count = 0
-    for entry in by_source.get("graph_context") or []:
-        if not isinstance(entry, dict):
-            continue
-        text = str(entry.get("text", "") or entry.get("content", "") or "")
-        if not session_id or session_id not in text:
-            count += 1
-    return count
-
-
 def _outage_output(state: str) -> dict:
     """Envelope for a prompt whose recall was skipped: see ``outage_header``."""
     session_id = _load_session_id()
@@ -643,7 +620,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
 
     counts = {k: len(v) for k, v in by_source.items()}
     total = sum(counts.values())
-    cross_session_hits = _count_cross_session_hits(by_source, session_id)
 
     # Name the other datasets the user could search instead (see
     # _other_datasets_hint) — on every prompt the server answered, since only
@@ -705,7 +681,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
                 .datetime.now(__import__("datetime").timezone.utc)
                 .isoformat(timespec="seconds"),
                 "hits": counts,
-                "cross_session_hits": cross_session_hits,
                 "per_scope": per_scope,
                 "saves_last_turn": saves_last_turn,
                 "session_totals": _totals,
@@ -774,7 +749,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             "context_lookup_hit",
             {
                 "counts": counts,
-                "cross_session_hits": cross_session_hits,
                 "per_scope": per_scope,
                 "saves_last_turn": saves_last_turn,
                 "elapsed_ms": elapsed_ms(recall_start),

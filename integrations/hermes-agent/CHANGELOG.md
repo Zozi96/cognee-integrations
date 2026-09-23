@@ -29,9 +29,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `HYBRID_COMPLETION`, `only_context=True` recall carrying the session id (plus the
   `code_graph` lane when a prompt arms it) and injects the item's `text` verbatim,
   uncapped — the former 500-character cut removed exactly the context and guidance
-  the block is for. The block is `<cognee_memory>` (was `<graph_memory>`); the
-  memory lane no longer counts as "beyond this session" in the hit header, since it
-  carries the session's own history. The in-process SDK backend now forwards `scope`
+  the block is for. The block is `<cognee_memory>` (was `<graph_memory>`); the hit header
+  no longer carries a "beyond this session" count, since the memory item mixes this
+  session's history with retrieved knowledge and nothing can tell them apart. The in-process SDK backend now forwards `scope`
   and `only_context` to `cognee.recall` so both transports send the same request.
   Against a pre-1.6.0 server the item holds the bare retrieval context and is
   injected the same way. The `recall_session_layers=false` legacy path and the

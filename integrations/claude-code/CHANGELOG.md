@@ -46,6 +46,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
   graph not built) the recent QA and trace rows stand in, as before. The empty-query
   seed recall, which matched nothing by design, is gone.
 
+- **The "from past sessions" count is gone** from the memory header, the status
+  line and `last_recall.json` (`cross_session_hits`). It guessed provenance by
+  looking for the session id inside each graph passage; the 1.6.0 memory item is one
+  rendered prompt that mixes history, retrieved context and guidance, so no substring
+  can say where a fact came from, and memory is graph-only recall now anyway.
+
 ### Fixed
 - **Fresh installs against cognee 1.6.0 could not mint their owner API key
   (SDK-740).** cognee 1.6.0 stopped baking `default_password` into the default user:

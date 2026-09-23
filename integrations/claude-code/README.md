@@ -500,10 +500,10 @@ Both cases show the same reason — the fix is the same either way, and `llm-sta
 **Memory hits.** The line ends with what memory actually did — this turn, then (faint) over the session:
 
 ```
-● cognee: agent_sessions · local · 5 memory hits (3 from past sessions) · 12/40 turns had hits this session
+● cognee: agent_sessions · local · 5 memory hits · 12/40 turns had hits this session
 ```
 
-`5 memory hits` is how many memories this turn's lookup found and injected into context (across session turns, traces, graph context and agent guidance). `3 from past sessions` is the part of that Claude could not have known from this conversation: knowledge-graph passages that came from an earlier session (or from a `remember`-ed document) rather than from this session's own cache — omitted when zero. `12/40 turns had hits this session` is the running total — 40 prompts so far, memory fired on 12 of them. A session that has not had a single hit yet shows `memory warming up (7 turns)` instead of a bare `0/7`: the graph is usually still filling up. `UserPromptSubmit` writes these to `~/.cognee-plugin/claude-code/recall/<session>.json`, so the renderer stays network-free, and the counts are stamped with the session that produced them so a second terminal's numbers never show up here. The per-scope breakdown (`recall 4s/5t/0g/1a · saved 2p/41t/2a` — `s`ession turns, `t`races, `g`raph context, `a`gent guidance; saves as `p`rompts, `t`races, `a`nswers) is still available with `COGNEE_STATUSLINE_COUNTS=full`; hide the segment with `false`.
+`5 memory hits` is how many memory blocks this turn's lookup found and injected into context (the memory request, plus code-graph facts when that lane is armed). `12/40 turns had hits this session` is the running total — 40 prompts so far, memory fired on 12 of them. A session that has not had a single hit yet shows `memory warming up (7 turns)` instead of a bare `0/7`: the graph is usually still filling up. `UserPromptSubmit` writes these to `~/.cognee-plugin/claude-code/recall/<session>.json`, so the renderer stays network-free, and the counts are stamped with the session that produced them so a second terminal's numbers never show up here. The per-scope breakdown (`recall 4s/5t/0g/1a · saved 2p/41t/2a` — `s`ession turns, `t`races, `g`raph context, `a`gent guidance; saves as `p`rompts, `t`races, `a`nswers) is still available with `COGNEE_STATUSLINE_COUNTS=full`; hide the segment with `false`.
 
 | Env var | Default | Effect |
 |---|---|---|

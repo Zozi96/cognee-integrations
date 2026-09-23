@@ -177,7 +177,6 @@ class CogneeMemoryProvider(MemoryProvider):
         self._turns_seen = 0
         self._turns_with_hits = 0
         self._hits_total = 0
-        self._cross_hits_total = 0
 
     @property
     def name(self) -> str:
@@ -555,7 +554,7 @@ class CogneeMemoryProvider(MemoryProvider):
                     if lines:
                         self._hits_total += len(lines)
                         self._turns_with_hits += 1
-                        rendered = self._hit_header(len(lines), 0) + rendered
+                        rendered = self._hit_header(len(lines)) + rendered
                         # Drop the result if a reset invalidated it mid-recall.
                         if generation == self._prefetch_generation:
                             self._prefetch_result = rendered
@@ -749,7 +748,6 @@ class CogneeMemoryProvider(MemoryProvider):
                 self._turns_seen = 0
                 self._turns_with_hits = 0
                 self._hits_total = 0
-                self._cross_hits_total = 0
 
     def on_memory_write(
         self,
@@ -920,7 +918,7 @@ class CogneeMemoryProvider(MemoryProvider):
 
     # -- layered per-prompt recall -------------------------------------------
 
-    def _hit_header(self, hits: int, cross: int) -> str:
+    def _hit_header(self, hits: int) -> str:
         """One plain-words line on what memory just contributed, or "".
 
         Must be called under ``_prefetch_lock`` after the counters were updated:
@@ -929,8 +927,6 @@ class CogneeMemoryProvider(MemoryProvider):
         if not str_to_bool(self._config.get("memory_hits"), True):
             return ""
         line = f"{hits} memory hit{'s' if hits != 1 else ''} this turn"
-        if cross:
-            line += f" ({cross} beyond this session)"
         line += f" · {self._turns_with_hits}/{self._turns_seen} turns had hits this session"
         return line + "\n"
 
@@ -998,7 +994,7 @@ class CogneeMemoryProvider(MemoryProvider):
         recall_timeout = self._timeout("recall_timeout", 120)
         top_k = min(self._top_k, 5)
 
-        lanes: list[tuple[str, dict[str, Any], bool]] = []
+        lanes: list[tuple[str, dict[str, Any]]] = []
         code_lane = self._code_lane(query)
         if code_lane:
             lanes.append(
@@ -1009,14 +1005,12 @@ class CogneeMemoryProvider(MemoryProvider):
                         "datasets": [code_lane["dataset"]],
                         "code_query": code_lane["code_query"],
                     },
-                    True,
                 )
             )
         # HYBRID_COMPLETION combines BM25 + vector + graph retrieval; with
         # only_context the LLM completion is skipped server-side and the item's
-        # text is the prompt that completion would have read. Not marked as
-        # cross-session: on >= 1.6.0 the item carries this session's history.
-        lanes.append((_MEMORY_LANE, {"scope": ["graph"], "query_type": "HYBRID_COMPLETION"}, False))
+        # text is the prompt that completion would have read.
+        lanes.append((_MEMORY_LANE, {"scope": ["graph"], "query_type": "HYBRID_COMPLETION"}))
 
         # Same deadline for every lane: min(per-call timeout, budget left).
         # Below the floor a call cannot return anything useful, so nothing is
@@ -1055,16 +1049,15 @@ class CogneeMemoryProvider(MemoryProvider):
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(lanes), thread_name_prefix="cognee-recall-lane"
             ) as pool:
-                outcomes = list(pool.map(_run_lane, [spec for _label, spec, _cross in lanes]))
+                outcomes = list(pool.map(_run_lane, [spec for _label, spec in lanes]))
 
         blocks: list[str] = []
         hits = 0
-        cross = 0
         answered = False
         hard_failures = 0
         # Fold the lanes in canonical order so the rendered blocks read the same
         # whichever request answered first.
-        for (label, spec, is_cross), (results, exc) in zip(lanes, outcomes):
+        for (label, spec), (results, exc) in zip(lanes, outcomes):
             if exc is not None:
                 if self._is_graph_not_built(exc, spec["scope"]):
                     answered = True
@@ -1080,8 +1073,6 @@ class CogneeMemoryProvider(MemoryProvider):
             if not lines:
                 continue
             hits += len(lines)
-            if is_cross:
-                cross += len(lines)
             blocks.append(f"<{label}>\n" + "\n".join(lines) + f"\n</{label}>")
 
         # One verdict per turn, not per lane: a single dead server must not
@@ -1097,9 +1088,8 @@ class CogneeMemoryProvider(MemoryProvider):
             if blocks:
                 self._turns_with_hits += 1
                 self._hits_total += hits
-                self._cross_hits_total += cross
                 if generation == self._prefetch_generation:
-                    self._prefetch_result = self._hit_header(hits, cross) + "\n\n".join(blocks)
+                    self._prefetch_result = self._hit_header(hits) + "\n\n".join(blocks)
 
     def _handle_recall(self, args: dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()

@@ -382,18 +382,16 @@ class TestMemoryHitHeader(unittest.TestCase):
             provider = make_provider(config={**_LAYERED, "memory_hits": True})
             out = _prefetch(provider)
         self.assertIn("1 memory hit this turn", out)
-        # The memory item carries this session's history, so it is not
-        # counted as reaching beyond the session.
         self.assertNotIn("beyond this session", out)
         self.assertIn("1/1 turns had hits this session", out)
 
-    def test_code_hits_count_as_beyond_this_session(self):
+    def test_code_hits_count_toward_the_turn_without_a_provenance_note(self):
         with fake_backend() as fake:
             fake.results["recall"] = [{"text": "remembered"}]
             provider = make_provider(config={**_WITH_CODE, "memory_hits": True})
             out = _prefetch(provider, _CODE_QUERY)
         self.assertIn("2 memory hits this turn", out)
-        self.assertIn("(1 beyond this session)", out)
+        self.assertNotIn("beyond this session", out)
 
     def test_totals_accumulate_across_turns(self):
         with fake_backend() as fake:

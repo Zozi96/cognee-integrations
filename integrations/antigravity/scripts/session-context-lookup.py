@@ -151,36 +151,12 @@ def _format_entry(entry: dict) -> str:
     return "\n".join(lines)
 
 
-def _count_cross_session_hits(by_source: dict, session_id: str) -> int:
-    """How many injected results came from outside this session.
-
-    The session, trace and agent-guidance scopes are queried by ``session_id``,
-    so everything they return is this session's own. Only the knowledge graph
-    reaches across sessions: the bridge stamps every synced session document
-    with a ``Session ID: <id>`` header (and distilled learnings keep the id in
-    their heading), so a graph passage that does not mention the current id
-    came from an earlier session — or from a ``remember``-ed document, which is
-    knowledge this conversation never produced either. That is the number the
-    memory header shows as ``N from past sessions``: what memory contributed
-    that the model could not have known from this conversation alone.
-    """
-    count = 0
-    for entry in by_source.get("graph_context") or []:
-        if not isinstance(entry, dict):
-            continue
-        text = str(entry.get("text", "") or entry.get("content", "") or "")
-        if not session_id or session_id not in text:
-            count += 1
-    return count
-
-
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 def _memory_summary(
     total: int,
-    cross_session: int,
     totals: dict,
     saves: dict,
     code_facts: int | None = None,
@@ -190,12 +166,11 @@ def _memory_summary(
 
     Antigravity has no glanceable status bar — this header, injected with the recalled
     context, is where the user sees what memory did — so it carries the same
-    two numbers the Claude Code bar shows: this turn's hits (with the share
-    that came from past sessions) and the session's running hit ratio, plus
-    what the previous turn persisted::
+    two numbers the Claude Code bar shows: this turn's hits and the session's
+    running hit ratio, plus what the previous turn persisted::
 
-        Cognee memory: 5 memory hits (3 from past sessions) · 12/40 turns had
-        hits this session · saved last turn 1 prompt / 3 trace / 1 answer
+        Cognee memory: 5 memory hits · 12/40 turns had hits this session ·
+        saved last turn 1 prompt / 3 trace / 1 answer
 
     A session with no hit yet reads ``memory warming up (7 turns)`` instead of
     a bare ``0/7``. When the repo code lane is armed, ``N code facts`` follows
@@ -212,11 +187,6 @@ def _memory_summary(
     parts = [_plural(total, "memory hit")]
     if code_facts is not None:
         parts[0] += f", {_plural(int(code_facts or 0), 'code fact')}"
-    cross = min(max(int(cross_session or 0), 0), total)
-    if cross == 1:
-        parts[0] += " (1 from a past session)"
-    elif cross > 1:
-        parts[0] += f" ({cross} from past sessions)"
     turns = int(totals.get("turns", 0) or 0)
     with_hits = int(totals.get("turns_with_hits", 0) or 0)
     if turns > 0:
@@ -719,7 +689,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
 
     counts = {k: len(v) for k, v in by_source.items()}
     total = sum(counts.values())
-    cross_session_hits = _count_cross_session_hits(by_source, session_id)
 
     # Session-cumulative counter: how many prompts this session has seen and on
     # how many of them memory actually injected something — the "memory fired
@@ -769,7 +738,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
                     .datetime.now(__import__("datetime").timezone.utc)
                     .isoformat(timespec="seconds"),
                     "hits": counts,
-                    "cross_session_hits": cross_session_hits,
                     "per_scope": per_scope,
                     "saves_last_turn": saves_last_turn,
                     "session_totals": _totals,
@@ -786,7 +754,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     status_line = render_status_for_host(_session_key)
     header = f"{status_line}\n" + _memory_summary(
         total,
-        cross_session_hits,
         _totals,
         saves_last_turn,
         code_facts=counts.get("code", 0) if code_lane else None,
@@ -826,7 +793,6 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             "context_lookup_hit",
             {
                 "counts": counts,
-                "cross_session_hits": cross_session_hits,
                 "session_totals": _totals,
                 "per_scope": per_scope,
                 "saves_last_turn": saves_last_turn,
