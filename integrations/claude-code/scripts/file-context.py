@@ -211,10 +211,33 @@ def code_lane_for(file_path: str) -> dict:
         rel = os.path.relpath(os.path.realpath(file_path), root).replace(os.sep, "/")
         if rel.startswith(".."):
             return {}
-        return {"dataset": str(state["dataset"]), "repo_root": root, "rel": rel}
+        return {
+            "dataset": str(state["dataset"]),
+            "repo_root": root,
+            "rel": rel,
+            "last_index_at": state.get("last_index_at"),
+        }
     except Exception as exc:
         hook_log("file_context_error", {"stage": "code_lane", "error": str(exc)[:200]})
         return {}
+
+
+def edited_since_index(file_path: str, last_index_at: object) -> bool:
+    """Whether the file changed after the code graph's snapshot of its repo.
+
+    ``last_index_at`` is stamped before the server reads the tree (first index
+    and every Stop-hook re-index alike), so an mtime past it means the graph
+    predates the file on disk: symbols likely still hold, line numbers may not.
+    Unknown on either side (no stamp, unreadable file) is "not edited" — the
+    note is a hint, and a missing hint only restores the pre-note behaviour.
+    A re-index that was submitted but is still processing server-side is not
+    caught; the stamp cannot tell submitted from done.
+    """
+    try:
+        stamp = float(last_index_at or 0)
+        return stamp > 0 and os.stat(file_path).st_mtime > stamp
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def facts_from(results: list) -> list[dict]:
@@ -361,48 +384,58 @@ def format_graph_hits(results: list) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_context(payload: dict, resolved: dict, deadline: float) -> tuple[str, dict]:
-    """Run the enabled lanes inside the deadline; returns (context, stats)."""
-    file_path = file_path_from(payload)
-    stats: dict = {"code": 0, "graph": 0, "lanes": []}
+def build_context(file_path: str, lane: dict, resolved: dict, deadline: float) -> tuple[str, dict]:
+    """Run the enabled lanes inside the deadline; returns (context, stats).
+
+    ``lane`` is ``code_lane_for(file_path)`` computed once by the caller ({}
+    when the file is outside every indexed repo). ``stats["answered"]`` is True
+    when at least one lane got a server response — empty or not — as opposed
+    to every lane erroring, timing out, or being skipped for lack of budget.
+    """
+    stats: dict = {"code": 0, "graph": 0, "lanes": [], "answered": False}
     sections: list[str] = []
     lanes = scopes()
     session_id = str(resolved.get("session_id") or "")
 
-    if "code" in lanes:
-        lane = code_lane_for(file_path)
-        if lane:
-            remaining = deadline - time.monotonic()
-            if remaining >= MIN_LANE_TIMEOUT:
-                stats["lanes"].append("code")
-                t0 = time.monotonic()
-                try:
-                    results = recall_via_http(
-                        lane["rel"],
-                        session_id=session_id,
-                        top_k=1,
-                        scope=["code"],
-                        dataset=lane["dataset"],
-                        code_query={
-                            "operation": "query_facts",
-                            "file": lane["rel"],
-                            "limit": CODE_LIMIT,
-                        },
-                        timeout=remaining,
-                    )
-                    facts = facts_from(results)
-                    stats["code"] = len(facts)
-                    block = format_code_facts(
-                        facts, lane["rel"], _int_env(ENV_MAX_SYMBOLS, DEFAULT_MAX_SYMBOLS)
-                    )
-                    if block:
-                        sections.append(block)
-                except Exception as exc:
-                    hook_log(
-                        "file_context_error",
-                        {"stage": "code", "error": str(exc)[:200], "elapsed_ms": elapsed_ms(t0)},
-                    )
-                stats["code_ms"] = elapsed_ms(t0)
+    if "code" in lanes and lane:
+        remaining = deadline - time.monotonic()
+        if remaining >= MIN_LANE_TIMEOUT:
+            stats["lanes"].append("code")
+            t0 = time.monotonic()
+            try:
+                results = recall_via_http(
+                    lane["rel"],
+                    session_id=session_id,
+                    top_k=1,
+                    scope=["code"],
+                    dataset=lane["dataset"],
+                    code_query={
+                        "operation": "query_facts",
+                        "file": lane["rel"],
+                        "limit": CODE_LIMIT,
+                    },
+                    timeout=remaining,
+                )
+                stats["answered"] = True
+                facts = facts_from(results)
+                stats["code"] = len(facts)
+                block = format_code_facts(
+                    facts, lane["rel"], _int_env(ENV_MAX_SYMBOLS, DEFAULT_MAX_SYMBOLS)
+                )
+                if block:
+                    if edited_since_index(file_path, lane.get("last_index_at")):
+                        stats["stale"] = True
+                        block += (
+                            "\n(This file changed after the code graph was last indexed: "
+                            "line numbers may have shifted — trust the file.)"
+                        )
+                    sections.append(block)
+            except Exception as exc:
+                hook_log(
+                    "file_context_error",
+                    {"stage": "code", "error": str(exc)[:200], "elapsed_ms": elapsed_ms(t0)},
+                )
+            stats["code_ms"] = elapsed_ms(t0)
 
     if "graph" in lanes and str(resolved.get("dataset") or ""):
         remaining = deadline - time.monotonic()
@@ -410,10 +443,7 @@ def build_context(payload: dict, resolved: dict, deadline: float) -> tuple[str, 
             stats["lanes"].append("graph")
             t0 = time.monotonic()
             try:
-                query = os.path.basename(file_path)
-                lane = code_lane_for(file_path)
-                if lane:
-                    query = lane["rel"]
+                query = lane["rel"] if lane else os.path.basename(file_path)
                 results = recall_via_http(
                     query,
                     session_id=session_id,
@@ -424,6 +454,7 @@ def build_context(payload: dict, resolved: dict, deadline: float) -> tuple[str, 
                     dataset_ids=list(resolved.get("dataset_ids") or []),
                     timeout=remaining,
                 )
+                stats["answered"] = True
                 block = format_graph_hits(results)
                 stats["graph"] = block.count("\n  - ") if block else 0
                 if block:
@@ -498,17 +529,21 @@ def run(payload: dict) -> str:
         return ""
 
     lanes = scopes()
-    has_code_lane = "code" in lanes and bool(code_lane_for(file_path))
-    if not has_code_lane and "graph" not in lanes:
+    # Resolved once: the graph lane reuses it for its query, and each call
+    # re-reads every repo index state from disk.
+    lane = code_lane_for(file_path)
+    if not ("code" in lanes and lane) and "graph" not in lanes:
         hook_log("file_context_skipped", {"reason": "no_lane"})
         return ""
 
     resolved = load_resolved(session_key, identity=False)
     deadline = started + _float_env(ENV_BUDGET, DEFAULT_BUDGET)
-    context, stats = build_context(payload, resolved, deadline)
-    # Mark even when empty: an empty answer is still an answer — no point
-    # asking again for this file within the TTL.
-    mark_seen(session_key, file_path)
+    context, stats = build_context(file_path, lane, resolved, deadline)
+    # Mark only when the server answered: an empty answer is still an answer
+    # (no point asking again within the TTL), but a timeout or error is not —
+    # a cold first call must not cost the file its context for the whole TTL.
+    if stats["answered"]:
+        mark_seen(session_key, file_path)
     if not context:
         hook_log(
             "file_context_skipped", {"reason": "empty", **stats, "elapsed_ms": elapsed_ms(started)}
