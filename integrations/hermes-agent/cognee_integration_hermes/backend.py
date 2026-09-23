@@ -96,20 +96,21 @@ class MemoryBackend:
         auto_route: bool,
         query_type: Optional[str],
         scope: Any = None,
-        context_profile: Optional[str] = None,
         code_query: Optional[dict[str, Any]] = None,
         only_context: bool = False,
         timeout: float,
     ) -> list[Any]:
-        """Search memory. ``scope`` is the provider's routing decision by name —
-        ``session``, ``graph`` or ``auto``, or an explicit list of server scopes
-        (e.g. ``["session", "trace", "session_context"]``) — alongside the
-        targets it implies.
+        """Search memory. ``scope`` is the list of server scopes to read —
+        ``["graph"]`` for memory, ``["code"]`` for the deterministic code graph
+        — alongside the targets it implies. Memory is read from the graph only:
+        the session-cache scopes and the server's ``auto`` scope (which folds
+        them in) are never requested, so a transport handed no scope states
+        ``["graph"]`` rather than leaving the server to infer one.
 
-        A transport that can state the scope outright should say it rather than
-        leave the server to infer it from which targets happen to be set: that
-        inference is conditional on other fields, so it silently changes meaning
-        when one of them moves.
+        A transport must state the scope outright rather than leave the server
+        to infer it from which targets happen to be set: that inference is
+        conditional on other fields, so it silently changes meaning when one of
+        them moves.
         """
         raise NotImplementedError
 
@@ -325,7 +326,6 @@ class SdkBackend(MemoryBackend):
         auto_route,
         query_type,
         scope=None,
-        context_profile=None,
         code_query=None,
         only_context=False,
         timeout,
@@ -335,10 +335,9 @@ class SdkBackend(MemoryBackend):
         # memory lane depends on them — ``scope=["graph"]`` with ``only_context``
         # and a ``session_id`` is what makes the server hand back the full
         # prompt-shaped memory item instead of running an LLM completion.
-        # ``context_profile`` / ``code_query`` are dropped: the SDK entry point
-        # has no ``code_query`` keyword, and every feature that sets either is
-        # HTTP-only anyway.
-        del context_profile, code_query
+        # ``code_query`` is dropped: the SDK entry point has no such keyword, and
+        # the code lane is HTTP-only anyway.
+        del code_query
         return self._bridge.run(
             self._do_recall(
                 query,
@@ -466,8 +465,9 @@ class SdkBackend(MemoryBackend):
             kwargs["datasets"] = datasets
         if query_type:
             kwargs["query_type"] = resolve_search_type(query_type)
-        if scope:
-            kwargs["scope"] = scope
+        # Always stated: left out, cognee resolves the scope to ``auto`` and
+        # folds the session cache in whenever a session id travels.
+        kwargs["scope"] = scope or ["graph"]
         if only_context:
             kwargs["only_context"] = True
 

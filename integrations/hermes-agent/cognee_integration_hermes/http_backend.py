@@ -13,7 +13,7 @@ on the pinned 1.5.4):
 ===================  =========================================================
 ``recall``           ``POST /api/v1/recall``   JSON: ``query``, ``search_type``,
                      ``scope``, ``datasets``, ``top_k``, ``session_id``,
-                     ``context_profile``, ``code_query``, ``only_context``
+                     ``code_query``, ``only_context``
 ``remember_session`` ``POST /api/v1/remember`` multipart: ``data``,
                      ``datasetName``, ``session_id``
 ``remember_permanent`` ``POST /api/v1/remember`` multipart: ``data``,
@@ -624,7 +624,6 @@ class HttpBackend(MemoryBackend):
         auto_route,
         query_type,
         scope=None,
-        context_profile=None,
         code_query=None,
         only_context=False,
         timeout,
@@ -643,18 +642,12 @@ class HttpBackend(MemoryBackend):
             body["session_id"] = session_id
         if datasets:
             body["datasets"] = datasets
-        if scope:
-            # State the scope outright. Without it the server infers sources from
-            # the other fields, and that inference requires a null search_type —
-            # so a caller who set COGNEE_AUTO_ROUTE=false would lose the session
-            # cache as a side effect of choosing a search strategy. A list scope
-            # (e.g. ["session", "trace", "session_context"]) travels as-is: the
-            # endpoint accepts a name or a list of names.
-            body["scope"] = scope
-        if context_profile:
-            # "agent" selects the distilled agent-guidance rendering for the
-            # session_context scope, matching the claude-code/codex recall.
-            body["context_profile"] = context_profile
+        # State the scope outright, always. Left out, the server resolves it to
+        # ``auto`` and — while search_type is null and a session id travels —
+        # folds the session cache into the sources. Memory is read from the
+        # graph only, so an unstated scope is ``["graph"]``. A list travels
+        # as-is: the endpoint accepts a name or a list of names.
+        body["scope"] = scope or ["graph"]
         if code_query is not None:
             # Deterministic code-graph lane (cognee >= 1.5.3): only meaningful
             # when the scope includes "code" — the server rejects it otherwise.

@@ -450,7 +450,7 @@ Every real prompt costs **one** `POST /api/v1/recall` — `scope: ["graph"]`, `s
 |--------|------|---------|-------------|
 | `recallSessionLayers` | boolean | `true` | **Deprecated, no effect.** The single graph recall already contains the session layers. Kept so existing configs keep validating |
 
-`memory_search` with `corpus=sessions` / `all` still requests the session layers explicitly (`scope: ["session","trace","session_context"]`) — that is a tool call, not the prompt path.
+The `memory_search` tool follows the same rule: it issues graph-scope requests only. The session-cache layers (`session`, `trace`, `session_context`) are written and bridged into the graph but are never searched — by the prompt path or by any tool.
 
 ### Agent tools: `memory_search` / `memory_get`
 
@@ -458,10 +458,10 @@ OpenClaw's memory slot comes with a tool contract: the bundled `active-memory` e
 
 | Tool | Parameters | Returns |
 |------|------------|---------|
-| `memory_search` | `query` (required), `maxResults`, `minScore`, `corpus` = `memory` \| `sessions` \| `all` (default) | `{ results: [{ reference, text, score, scope, source, time }] }`; `{ results: [], disabled: true, error, warning, action }` when Cognee is unreachable or the recall breaker is open |
+| `memory_search` | `query` (required), `maxResults`, `minScore`, `corpus` = `memory` \| `all` (default) | `{ results: [{ reference, text, score, scope, source, time }] }` (`scope` is always `graph`); `{ results: [], disabled: true, error, warning, action }` when Cognee is unreachable or the recall breaker is open |
 | `memory_get` | `path` (a `cognee://…` reference from `memory_search`, or a workspace memory file such as `MEMORY.md` / `memory/notes.md`), `from`, `lines` | The referenced memory's full text with provenance, or a bounded file excerpt with `truncated`/`nextFrom`. Stale references return an `error` field, not a failure |
 
-`corpus=memory` searches the permanent graph across the configured scopes, `corpus=sessions` this conversation's session cache, `all` both. `wiki` is not backed by Cognee and returns no results. Set `memoryTools: false` to opt out.
+`memory_search` searches the permanent knowledge graph across the configured scopes — one explicit `scope: ["graph"]` request per dataset (plus the deterministic code graph via `memory_code_search`). `corpus=memory` and `corpus=all` are synonyms; the former `sessions` corpus is gone (the session cache is never searched, and `cognee://session/…` references are no longer issued or accepted by `memory_get`). `wiki` is kept for memory-core compatibility and returns no results. Set `memoryTools: false` to opt out.
 
 ### Agent tool: `memory_forget`
 

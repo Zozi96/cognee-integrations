@@ -191,7 +191,7 @@ class TestHttpRoundTrip(unittest.TestCase):
             found = json.loads(
                 provider.handle_tool_call(
                     "cognee_recall",
-                    {"query": "Who wrote the first algorithm?", "scope": "graph"},
+                    {"query": "Who wrote the first algorithm?"},
                 )
             )
             self.assertNotIn("error", found, found)

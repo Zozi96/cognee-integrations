@@ -335,7 +335,6 @@ LLM_API_KEY=sk-...
 | `recall_timeout` | `COGNEE_RECALL_TIMEOUT` | `120` (seconds) |
 | `write_timeout` | `COGNEE_WRITE_TIMEOUT` | `120` (seconds) |
 | `improve_timeout` | `COGNEE_IMPROVE_TIMEOUT` | `300` (seconds) |
-| `recall_session_layers` | `COGNEE_RECALL_LAYERS` | `true` (the per-prompt memory block; `false` = legacy single auto-scope search) |
 | `recall_budget` | `COGNEE_RECALL_BUDGET` | `20` (seconds, bounds the per-prompt recall) |
 | `memory_steer` | `COGNEE_MEMORY_STEER` | `true` |
 | `memory_steer_text` | `COGNEE_MEMORY_STEER_TEXT` | built-in wording |
@@ -439,6 +438,15 @@ context, then the session guidance block — and the plugin injects that string
 verbatim as the `<cognee_memory>` block, untruncated. Older servers (1.5.x)
 return the bare retrieval context in `text`, which is injected the same way.
 The item's `system_prompt` field is ignored.
+
+Memory is read from the knowledge graph only, on the per-prompt block and on the
+explicit `cognee_recall` tool alike: the server's session-cache scopes
+(`session`, `trace`, `session_context`) and its `auto` scope, which folds them
+in, are never requested. Turns are still written to the session cache — that is
+what `improve()` promotes into the graph at session end — but they are not
+searched as raw entries; on cognee >= 1.6.0 the graph item's prompt already
+carries this conversation's history because the session id travels with every
+recall. `cognee_recall` takes `query`, an optional `search_type` and `top_k`.
 
 ## Code graph: index a repository
 

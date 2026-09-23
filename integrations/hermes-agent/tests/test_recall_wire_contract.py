@@ -6,12 +6,14 @@ catch the failure this file exists for: a body that is well-formed, accepted wit
 a 2xx, and still means something other than what the plugin intended — because
 the server supplies a default for a field the plugin left out.
 
-That is exactly what happened. ``/api/v1/recall`` defaults a *missing*
-``search_type`` to ``GRAPH_COMPLETION`` (deliberately, so older clients keep
-their behaviour), and cognee only folds the session cache into an ``auto`` scope
-while the search type is null. Omitting the key therefore cost auto-routing *and*
-every session read, on every scope, with no error anywhere — the write path was
-storing turns the read path could never see.
+Two such defaults matter here. ``/api/v1/recall`` once defaulted a *missing*
+``search_type`` to ``GRAPH_COMPLETION`` (1.6.0 moved that default to null), and
+an *unstated* scope resolves to ``auto``, which folds the session cache into the
+sources whenever a session id travels with a null search type. Memory must read
+the knowledge graph only — the session-cache scopes are noise — so the plugin
+states ``scope=["graph"]`` on every request while still sending the session id
+(on 1.6.0 that is what puts the conversation history into the graph item's
+prompt). Left unstated, the very same body would read the session cache too.
 
 So these tests parse the real ``RecallPayloadDTO`` and call the real
 ``normalize_scope``: the server's own code decides what the request means. They
@@ -56,7 +58,7 @@ def _sent_body(**overrides):
         "top_k": 5,
         "auto_route": True,
         "query_type": None,
-        "scope": "auto",
+        "scope": ["graph"],
         "timeout": 5.0,
     }
     params.update(overrides)
@@ -120,33 +122,40 @@ class TestRecallBodyMeansWhatWeIntend(unittest.TestCase):
         dto = self._parse(_sent_body(auto_route=False))
         self.assertEqual(str(dto.search_type), "SearchType.GRAPH_COMPLETION")
 
-    def test_every_scope_resolves_to_the_sources_the_tool_advertises(self):
-        # The cognee_recall schema promises "auto, session, or graph". Before the
-        # fix all three resolved to ["graph"].
-        self.assertIn("session", self._sources(self._parse(_sent_body(scope="session"))))
-        self.assertIn("session", self._sources(self._parse(_sent_body(scope="auto"))))
-        self.assertEqual(
-            self._sources(self._parse(_sent_body(scope="graph", session_id=None))), ["graph"]
-        )
+    def test_the_graph_scope_resolves_to_the_graph_alone(self):
+        # The session id travels (it is what gives the 1.6.0 graph item its
+        # history), yet the server never folds the session cache in: an explicit
+        # graph scope is resolved before the session_id/search_type inference.
+        dto = self._parse(_sent_body())
+        self.assertEqual(dto.session_id, "hermes_s1")
+        self.assertEqual(self._sources(dto), ["graph"])
 
-    def test_session_scope_survives_a_pinned_search_type(self):
-        # COGNEE_AUTO_ROUTE=false must not cost the session cache: the stated
-        # scope decides the sources, so it no longer rides on search_type.
-        dto = self._parse(_sent_body(scope="session", auto_route=False))
-        self.assertEqual(self._sources(dto), ["session"])
+    def test_the_default_transport_scope_is_the_graph_too(self):
+        # A caller that names no scope gets the same request, not the server's
+        # auto default.
+        self.assertEqual(self._sources(self._parse(_sent_body(scope=None))), ["graph"])
 
-    def test_the_old_body_could_not_reach_the_session_cache(self):
-        # The regression, end to end: strip search_type and the stated scope —
-        # the 0.2.0 wire format — and, before 1.6.0, no scope could see session
-        # memory. On 1.6.0 the server's null default lets the same body fold the
-        # session in again; the plugin's explicit scope (tests above) is what
-        # keeps the request meaning the same on every server.
+    def test_the_code_scope_resolves_to_the_code_graph_alone(self):
+        dto = self._parse(_sent_body(scope=["code"], code_query={"operation": "query_facts"}))
+        self.assertEqual(self._sources(dto), ["code"])
+
+    def test_the_graph_scope_survives_a_pinned_search_type(self):
+        # COGNEE_AUTO_ROUTE=false pins GRAPH_COMPLETION; the sources still come
+        # from the stated scope, not from the search type.
+        dto = self._parse(_sent_body(auto_route=False))
+        self.assertEqual(self._sources(dto), ["graph"])
+
+    def test_an_unstated_scope_would_have_read_the_session_cache(self):
+        # Why the scope is always stated: the same body minus the key — a
+        # session id and a null search type — is exactly the shape the server
+        # folds the session cache into on 1.6.0 (and, before 1.6.0, only while
+        # the search type arrived as an explicit null).
+        body = _sent_body()
+        body.pop("scope")
+        self.assertEqual(self._sources(self._parse(body)), ["session", "graph"])
+        body.pop("search_type")
         expected = ["session", "graph"] if _server_defaults_search_type_to_null() else ["graph"]
-        for scope in ("session", "auto"):
-            body = _sent_body(scope=scope)
-            body.pop("search_type")
-            body.pop("scope")
-            self.assertEqual(self._sources(self._parse(body)), expected)
+        self.assertEqual(self._sources(self._parse(body)), expected)
 
 
 if __name__ == "__main__":

@@ -36,8 +36,19 @@ date-based (`YYYY.M.D`), matching the OpenClaw plugin ecosystem.
   `<user_memory>` / `<company_memory>` labels give way to one `<cognee_memory>` per
   dataset. `recallSessionLayers` is now a parsed no-op, kept so existing configs
   keep validating. Against a pre-1.6.0 server the item holds the bare retrieval
-  context and is injected the same way. The `memory_search` tool's session corpus
-  is unchanged.
+  context and is injected the same way.
+- **`memory_search` searches the knowledge graph only.** The tool used to accept
+  `corpus=sessions` / `all` and, when a session id resolved, add a second recall
+  over the session-cache layers (`scope: ["session","trace","session_context"]`,
+  `context_profile: "agent"`), tagging those hits `scope: "session"`. Those layers
+  are noise when searched, so the tool now matches the prompt-time recall: one
+  explicit `scope: ["graph"]` request per recall dataset, nothing else. `corpus`
+  accepts `memory` | `all` (synonyms) | `wiki` (no results); `sessions` is gone
+  from the schema and any unknown value falls back to `all`. Hits are always
+  `scope: "graph"`, `cognee://session/…` references are no longer produced, and
+  `memory_get` rejects them as it does any non-reference path. Session capture,
+  bridging (`/improve`) and sync are unchanged — sessions are still written, just
+  never searched.
 
 ### Fixed
 - **Fresh installs against cognee 1.6.0 could not mint their owner API key

@@ -34,8 +34,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
   session's history with retrieved knowledge and nothing can tell them apart. The in-process SDK backend now forwards `scope`
   and `only_context` to `cognee.recall` so both transports send the same request.
   Against a pre-1.6.0 server the item holds the bare retrieval context and is
-  injected the same way. The `recall_session_layers=false` legacy path and the
-  explicit `cognee_recall` tool are unchanged.
+  injected the same way.
+- **Recall reads the knowledge graph and the code graph only.** The server's
+  session-cache scopes (`session`, `trace`, `session_context`) and its `auto` scope,
+  which folds them in, are noise next to the cognified graph and are no longer
+  requested anywhere. The explicit `cognee_recall` tool lost its `scope` argument
+  (`auto` | `session` | `graph`; a caller still passing one is ignored) and always
+  sends `scope=["graph"]` with the dataset, the caller's `search_type` (or none, for
+  the query classifier) and the session id — on cognee 1.6.0 the graph item's prompt
+  then carries the conversation history, and an explicit graph scope never returns
+  raw session entries. The legacy single `auto`-scope prefetch and its
+  `recall_session_layers` / `COGNEE_RECALL_LAYERS` toggle are gone: the per-prompt
+  memory block above is the only prefetch. Both transports now state `["graph"]`
+  when handed no scope instead of letting the server default to `auto`, and the
+  unused `context_profile` field (a `session_context` rendering option) is dropped
+  from the backend interface. Sessions are still written and still promoted into
+  the graph by `improve()`; they are just not searched as raw entries.
 
 ### Fixed
 - **Fresh installs against cognee 1.6.0 could not mint their owner API key

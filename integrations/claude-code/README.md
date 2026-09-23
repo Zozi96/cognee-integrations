@@ -279,9 +279,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py" --others   # the candid
 "${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "<query>" 10 --graph --dataset-id <uuid>
 ```
 
-A dataset other than the active one has none of this session's history, so the wrapper forces
-graph scope and drops the session id for it (noted on stderr); the active dataset named by hand
-keeps the full scope. Datasets are addressed by UUID because a name only resolves among the
+Every search reads the knowledge graph (or, with `--code`, a repository's code graph); the
+session cache is written, never searched. The session id is bound to the active dataset, so the
+wrapper drops it for any other dataset; the active dataset named by hand keeps it. Datasets are
+addressed by UUID because a name only resolves among the
 datasets your identity owns. The listing behind the hint is cached per plugin
 (`~/.cognee-plugin/claude-code/readable-datasets.json`) and refreshed at most every
 `COGNEE_DATASETS_CACHE_TTL` seconds (default `300`), inside what is left of the recall budget,

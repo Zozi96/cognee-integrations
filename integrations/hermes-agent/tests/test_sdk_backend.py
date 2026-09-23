@@ -104,17 +104,17 @@ class TestRecallWireFormat(unittest.TestCase):
         self.assertIs(kwargs["only_context"], True)
         self.assertEqual(kwargs["session_id"], "hermes_s1")
 
-    def test_default_scope_and_only_context_are_omitted(self):
+    def test_absent_scope_is_stated_as_the_graph(self):
+        # Left out, cognee.recall resolves the scope to ``auto`` and folds the
+        # session cache in alongside the session id; memory reads the graph only.
         kwargs = self._recall_kwargs()
-        self.assertNotIn("scope", kwargs)
+        self.assertEqual(kwargs["scope"], ["graph"])
         self.assertNotIn("only_context", kwargs)
 
     def test_http_only_fields_are_not_forwarded(self):
-        kwargs = self._recall_kwargs(
-            scope=["code"], code_query={"operation": "query_facts"}, context_profile="agent"
-        )
+        kwargs = self._recall_kwargs(scope=["code"], code_query={"operation": "query_facts"})
         self.assertNotIn("code_query", kwargs)
-        self.assertNotIn("context_profile", kwargs)
+        self.assertEqual(kwargs["scope"], ["code"])
 
 
 class TestRememberWireFormat(unittest.TestCase):

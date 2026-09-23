@@ -3,9 +3,9 @@
 RECALL_SCHEMA = {
     "name": "cognee_recall",
     "description": (
-        "Search Cognee session memory and the persistent knowledge graph for relevant "
-        "information. Use for questions that may depend on prior conversations, stored "
-        "facts, project context, or knowledge already captured by Cognee."
+        "Search Cognee's persistent knowledge graph for relevant information. Use for "
+        "questions that may depend on prior conversations, stored facts, project "
+        "context, or knowledge already captured by Cognee."
     ),
     "parameters": {
         "type": "object",
@@ -13,11 +13,6 @@ RECALL_SCHEMA = {
             "query": {
                 "type": "string",
                 "description": "Natural language query to search for.",
-            },
-            "scope": {
-                "type": "string",
-                "description": "Search scope: auto, session, or graph. Default: auto.",
-                "enum": ["auto", "session", "graph"],
             },
             "search_type": {
                 "type": "string",

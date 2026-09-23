@@ -41,6 +41,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
   server the item holds the bare retrieval context and is rendered the same way; the
   session layers are then not injected.
 
+- **Search is graph and code only.** `cognee-search.sh` no longer has a `--session`
+  mode and no longer defaults to session-then-graph; every search is a graph-scope
+  recall (or `--code`). The session cache is written and bridged, never searched:
+  on cognee 1.6.0 the graph item's prompt already carries this session's history.
 - **The "from past sessions" count is gone** from the memory header, the status
   line and `last_recall.json` (`cross_session_hits`). It guessed provenance by
   looking for the session id inside each graph passage; the 1.6.0 memory item is one

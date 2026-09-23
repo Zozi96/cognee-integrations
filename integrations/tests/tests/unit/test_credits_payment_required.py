@@ -23,7 +23,7 @@ import json
 import urllib.error
 
 import pytest
-from utils.recall import URL, drive_recall
+from utils.recall import URL, arm_code_lane, drive_recall
 
 _TENANT = "f8c21da4-6674-4cc5-bc56-de5e93db881d"
 _URL = f"https://tenant-{_TENANT}.aws.cognee.ai"
@@ -236,8 +236,10 @@ def test_recall_402_wins_over_scopes_that_got_through(lookup, monkeypatch):
     """A mixed round still means the tenant could not pay for part of the recall."""
     module, calls = lookup
 
+    arm_code_lane(monkeypatch)
+
     def _mixed(_prompt, **kw):
-        if kw["scope"] == ["session"]:
+        if kw["scope"] == ["code"]:
             return []
         raise urllib.error.HTTPError(URL, 402, "boom", {}, None)
 

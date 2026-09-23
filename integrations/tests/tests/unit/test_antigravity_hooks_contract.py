@@ -562,7 +562,7 @@ def test_search_shell_keeps_the_shared_recall_breaker(monkeypatch, tmp_path):
         }
     )
     result = subprocess.run(
-        ["bash", str(SCRIPTS_DIR / "cognee-search.sh"), "question", "--session"],
+        ["bash", str(SCRIPTS_DIR / "cognee-search.sh"), "question", "--graph"],
         cwd=tmp_path,
         env=env,
         check=True,

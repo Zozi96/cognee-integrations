@@ -2,9 +2,9 @@
  * Wire-format handling for recall items and /improve:
  *   * normalizeSearchResults keeps a graph item's `text` verbatim (the cognee
  *     >= 1.6.0 full-prompt text included) and never reads `system_prompt`;
- *     session/trace/session_context entries (which carry no `text`, still
- *     served to memory_search corpus=sessions) are rendered from their fields
- *     and keep the `source` discriminator;
+ *     session/trace/session_context entries (which carry no `text`; no
+ *     search path requests them any more, but the client stays wire-complete)
+ *     are rendered from their fields and keep the `source` discriminator;
  *   * normalizeImproveResponse collapses both the flat and the per-dataset
  *     response shapes, so describeImprove never prints `status=?` for a map.
  */

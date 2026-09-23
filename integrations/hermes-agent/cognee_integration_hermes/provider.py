@@ -122,7 +122,7 @@ def _recall_failure_advice(exc: Exception) -> str:
     return (
         " The default GRAPH_COMPLETION search runs an LLM per query and can be "
         "slow on local models — retry with search_type='CHUNKS' (fast raw-text "
-        "retrieval) or scope='session', or raise COGNEE_RECALL_TIMEOUT."
+        "retrieval), or raise COGNEE_RECALL_TIMEOUT."
     )
 
 
@@ -535,37 +535,9 @@ class CogneeMemoryProvider(MemoryProvider):
         # than any bounded join would still write after the clear.
         generation = self._prefetch_generation
 
-        def _run() -> None:
-            if str_to_bool(self._config.get("recall_session_layers"), True):
-                self._run_layered_prefetch(query, cognee_session_id, generation)
-                return
-            try:
-                results = self._recall(
-                    query,
-                    scope="auto",
-                    search_type=None,
-                    top_k=min(self._top_k, 5),
-                    session_id=cognee_session_id,
-                )
-                lines = self._format_recall_lines(results, limit=5)
-                rendered = "\n".join(lines)
-                with self._prefetch_lock:
-                    self._turns_seen += 1
-                    if lines:
-                        self._hits_total += len(lines)
-                        self._turns_with_hits += 1
-                        rendered = self._hit_header(len(lines)) + rendered
-                        # Drop the result if a reset invalidated it mid-recall.
-                        if generation == self._prefetch_generation:
-                            self._prefetch_result = rendered
-                # The backend answered, so this is a success either way.
-                self._record_success()
-            except Exception as exc:
-                self._record_failure()
-                logger.debug("Cognee prefetch failed: %s", exc)
-
         self._prefetch_thread = threading.Thread(
-            target=_run,
+            target=self._run_layered_prefetch,
+            args=(query, cognee_session_id, generation),
             daemon=True,
             name="cognee-hermes-prefetch",
         )
@@ -858,53 +830,33 @@ class CogneeMemoryProvider(MemoryProvider):
         """A named, bounded timeout read from config at call time."""
         return float(self._config.get(key, default))
 
-    def _recall_scope_params(
-        self, scope: str, search_type: Any, session_id: str
-    ) -> tuple[Optional[str], Optional[list[str]], Optional[str], str]:
-        """Map the tool's ``scope`` onto the backend's explicit targets.
-
-        ``session`` searches only this conversation's cache, ``graph`` only the
-        permanent dataset, ``auto`` both. A ``search_type`` override is
-        meaningless for a pure session lookup, so it is dropped there.
-
-        The normalized scope name is returned alongside the targets so a
-        transport can pass the decision on rather than re-derive it. An
-        unrecognized name resolves to ``auto`` here rather than travelling
-        onward, so the backend is never handed a scope the server would reject.
-        """
-        normalized = (scope or "auto").lower()
-        if normalized == "session":
-            if str_to_bool(self._config.get("recall_session_layers"), True):
-                # The session corpus is three server scopes, not one: cached Q&A
-                # turns, tool-call trace lessons, and distilled agent guidance.
-                # Same scope list openclaw's memory_search corpus=sessions sends.
-                return session_id, [self._dataset], None, ["session", "trace", "session_context"]
-            return session_id, None, None, normalized
-        query_type = search_type or None
-        if normalized == "graph":
-            return None, [self._dataset], query_type, normalized
-        return session_id, [self._dataset], query_type, "auto"
-
     def _recall(
         self,
         query: str,
         *,
-        scope: str,
         search_type: Any,
         top_k: int,
         session_id: str,
     ) -> list[Any]:
-        target_session, datasets, query_type, resolved_scope = self._recall_scope_params(
-            scope, search_type, session_id
-        )
+        """The explicit ``cognee_recall`` search: the knowledge graph, stated outright.
+
+        Memory is read from the graph only. The session cache (the server's
+        ``session``, ``trace`` and ``session_context`` scopes) and the ``auto``
+        scope that folds it in are never requested — those entries are noise
+        next to the cognified graph. The session id still travels: on cognee
+        >= 1.6.0 the graph item's prompt then carries this conversation's
+        history, and an explicit graph scope never returns raw session entries.
+        ``search_type`` is the caller's override or None for the query
+        classifier.
+        """
         return self._backend.recall(
             query=query,
-            session_id=target_session,
-            datasets=datasets,
+            session_id=session_id,
+            datasets=[self._dataset],
             top_k=top_k,
             auto_route=self._auto_route,
-            query_type=query_type,
-            scope=resolved_scope,
+            query_type=search_type or None,
+            scope=["graph"],
             timeout=self._timeout("recall_timeout", 120),
         )
 
@@ -1031,7 +983,6 @@ class CogneeMemoryProvider(MemoryProvider):
                     auto_route=True,
                     query_type=spec.get("query_type"),
                     scope=spec["scope"],
-                    context_profile=spec.get("context_profile"),
                     code_query=spec.get("code_query"),
                     only_context=True,
                     timeout=lane_timeout,
@@ -1096,13 +1047,13 @@ class CogneeMemoryProvider(MemoryProvider):
         if not query:
             return json.dumps({"error": "Missing required parameter: query"})
         top_k = min(max(1, int(args.get("top_k") or self._top_k)), 20)
-        scope = str(args.get("scope") or "auto")
+        # A ``scope`` argument from an older tool schema is ignored: every
+        # explicit recall targets the graph (see ``_recall``).
         search_type = args.get("search_type")
 
         try:
             results = self._recall(
                 query,
-                scope=scope,
                 search_type=search_type,
                 top_k=top_k,
                 session_id=self._session_cognee_id,

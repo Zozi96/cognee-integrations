@@ -9,8 +9,8 @@
  * verbatim in a `<cognee_memory>` block. The separate session/trace/
  * session_context requests are gone; the item's `system_prompt` is never read.
  * Older servers return the bare retrieval context in `text` and render the
- * same way. memory_search corpus=sessions still uses the explicit session
- * scopes — that is a tool call, not the prompt path.
+ * same way. The memory_search tool follows the same rule: graph-scope
+ * requests only, never the session/trace/session_context layers.
  */
 
 import plugin from "../../src/plugin";
@@ -214,20 +214,38 @@ describe("multi-scope: one request across every scope dataset, one block per ite
   });
 });
 
-describe("memory_search corpus=sessions", () => {
-  it("still requests the session layers explicitly (tool path, not the prompt path)", async () => {
-    mockRecall.mockImplementation(async () => [
-      { id: "c1", text: "Always confirm before deleting.", score: 1, source: "session_context" },
-      { id: "t1", text: "deploy (error)\nLesson: retry with --wait", score: 1, source: "trace" },
-      { id: "q1", text: "Q: theme?\nA: dark", score: 1, source: "session" },
-    ]);
+describe("memory_search searches the knowledge graph only", () => {
+  const SESSION_LAYERS = ["session", "trace", "session_context"];
+
+  it("issues graph-scope requests only, even with a live session and corpus=all", async () => {
+    mockRecall.mockImplementation(async () => [OLD_SERVER_ITEM]);
     const harness = createPluginApi(plugin, { autoRecall: false, enableSessions: true });
-    const [searchTool] = harness.tools({ agentId: "will", sessionId: "s1" });
-    const res = (await searchTool.execute("c", { query: "theme?", corpus: "sessions" })) as { details: { results: Array<{ source: string; scope: string }> } };
+    const [searchTool, getTool] = harness.tools({ agentId: "will", sessionId: "s1" });
+    const res = (await searchTool.execute("c", { query: "theme?", corpus: "all" })) as { details: { results: Array<{ reference: string; scope: string }> } };
 
     expect(mockRecall).toHaveBeenCalledTimes(1);
-    expect(mockRecall.mock.calls[0][0]).toMatchObject({ scope: ["session", "trace", "session_context"], contextProfile: "agent", sessionId: "open_claw_s1" });
-    expect(res.details.results.map((r) => r.source).sort()).toEqual(["agent guidance", "session", "trace"]);
-    expect(res.details.results.every((r) => r.scope === "session")).toBe(true);
+    const p = mockRecall.mock.calls[0][0];
+    expect(p).toMatchObject({ queryText: "theme?", searchType: "HYBRID_COMPLETION", scope: ["graph"], datasetIds: ["ds-1"] });
+    expect(p.scope?.some((s) => SESSION_LAYERS.includes(s))).toBe(false);
+    expect(p.contextProfile).toBeUndefined();
+    expect((p as Record<string, unknown>).context_profile).toBeUndefined();
+    expect(p.sessionId).toBeUndefined();
+    expect(res.details.results).toHaveLength(1);
+    expect(res.details.results[0]).toMatchObject({ scope: "graph", reference: "cognee://graph/g1" });
+
+    // memory_get resolves graph references and rejects session-scope handles outright.
+    const got = (await getTool.execute("g", { path: "cognee://graph/g1" })) as { details: { text: string; scope?: string } };
+    expect(got.details).toMatchObject({ text: "User prefers dark mode", scope: "graph" });
+    const rejected = (await getTool.execute("g2", { path: "cognee://session/x" })) as { details: { text: string; error?: string } };
+    expect(rejected.details.text).toBe("");
+    expect(rejected.details.error).toMatch(/cognee:\/\/ reference .* or a workspace memory file/);
+  });
+
+  it("never lists sessions as a corpus", () => {
+    const harness = createPluginApi(plugin, { autoRecall: false, enableSessions: true });
+    const [searchTool] = harness.tools({ agentId: "will", sessionId: "s1" });
+    const corpus = (searchTool.parameters as { properties: { corpus: { enum: string[] } } }).properties.corpus;
+    expect(corpus.enum).not.toContain("sessions");
+    expect(searchTool.description).not.toMatch(/session cache|conversation/i);
   });
 });

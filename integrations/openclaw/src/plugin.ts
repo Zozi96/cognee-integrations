@@ -382,7 +382,6 @@ const memoryCogneePlugin = {
                   resolveDatasets: resolveToolDatasets,
                   recall: (p) => recallWithBreaker({ ...p, searchType: p.searchType ?? cfg.searchType, searchPrompt: p.searchPrompt ?? cfg.searchPrompt }),
                   breakerOpenForSeconds: () => recallBreaker.openForSeconds(),
-                  sessionIdFor: (hostSessionId, c) => (cfg.enableSessions && hostSessionId ? conversationSessionId(hostSessionId, c ?? memoryCtx) : undefined),
                   cache: toolReferenceCache,
                   logger: toolLogger,
                 },

@@ -234,9 +234,7 @@ def load_config(hermes_home: str | Path | None = None) -> dict[str, Any]:
         # Per-prompt memory block: one graph-scope only_context HYBRID_COMPLETION
         # recall carrying the session id (on cognee >= 1.6.0 its text already
         # holds the session history, retrieved context and guidance), plus the
-        # code lane when armed. Off, the prefetch is the legacy single
-        # auto-scope search. The budget bounds the whole prefetch.
-        "recall_session_layers": str_to_bool(os.environ.get("COGNEE_RECALL_LAYERS"), True),
+        # code lane when armed. The budget bounds the whole prefetch.
         "recall_budget": str_to_int(os.environ.get("COGNEE_RECALL_BUDGET"), 20),
         # Memory steer: one system-prompt line asserting Cognee as the preferred,
         # authoritative long-term memory (the COGNEE_PREFER_MEMORY counterpart).
@@ -280,7 +278,6 @@ def load_config(hermes_home: str | Path | None = None) -> dict[str, Any]:
     config["auto_route"] = str_to_bool(config.get("auto_route"), True)
     config["improve_on_end"] = str_to_bool(config.get("improve_on_end"), True)
     config["embedded"] = str_to_bool(config.get("embedded"), False)
-    config["recall_session_layers"] = str_to_bool(config.get("recall_session_layers"), True)
     config["recall_budget"] = max(1, str_to_int(config.get("recall_budget"), 20))
     config["memory_steer"] = str_to_bool(config.get("memory_steer"), True)
     config["memory_hits"] = str_to_bool(config.get("memory_hits"), True)

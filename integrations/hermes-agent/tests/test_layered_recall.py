@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 from _char_helpers import fake_backend, fake_cognee, make_provider  # noqa: E402
 from cognee_integration_hermes.backend import SdkBackend  # noqa: E402
 
-_LAYERED = {"recall_session_layers": True, "recall_budget": 20}
+_LAYERED = {"recall_budget": 20}
 # Arms the code lane: a configured code dataset plus an identifier in the prompt.
 _WITH_CODE = {**_LAYERED, "code_datasets": "codebase-svc-abc123"}
 _CODE_QUERY = "what calls process_payment?"
@@ -87,7 +87,7 @@ class TestSingleMemoryRequest(unittest.TestCase):
         self.assertTrue(kwargs["session_id"])
         self.assertEqual(kwargs["session_id"], "hermes_s-1")
         self.assertEqual(kwargs["datasets"], ["hermes"])
-        self.assertIsNone(kwargs["context_profile"])
+        self.assertNotIn("context_profile", kwargs)
         self.assertIsNone(kwargs["code_query"])
 
     def test_no_separate_session_layer_requests(self):
@@ -419,25 +419,117 @@ class TestMemoryHitHeader(unittest.TestCase):
         self.assertNotIn("memory hit", out)
 
 
-class TestSessionScopeMapping(unittest.TestCase):
-    """The explicit ``cognee_recall`` tool keeps its own scope mapping; only
-    the per-prompt path collapsed to the single memory request."""
+# The server scopes memory must never read: the session cache (cached turns,
+# tool-call trace lessons, distilled guidance) and the ``auto`` scope that folds
+# it in. ``None`` is the same thing by omission — the server defaults to auto.
+_SESSION_SCOPES = ("session", "trace", "session_context", "auto")
 
-    def test_tool_session_scope_covers_the_three_session_layers(self):
+
+def _assert_graph_only(case, calls):
+    """Every recall read the graph or the code graph, and stated it outright."""
+    case.assertTrue(calls, "no recall was made")
+    for kwargs in calls:
+        scope = kwargs.get("scope")
+        case.assertIn(scope, (["graph"], ["code"]), kwargs)
+        for retired in _SESSION_SCOPES:
+            case.assertNotIn(retired, scope)
+        case.assertNotIn("context_profile", kwargs)
+
+
+class TestExplicitRecallReadsTheGraph(unittest.TestCase):
+    """The ``cognee_recall`` tool targets the graph too; its old ``scope``
+    argument (auto | session | graph) is gone, and a caller still passing one
+    is ignored."""
+
+    def _recall_kwargs(self, args):
         with fake_backend() as fake:
-            provider = make_provider(config={"recall_session_layers": True})
-            provider.handle_tool_call("cognee_recall", {"query": "q", "scope": "session"})
-            kwargs = fake.only_call("recall")
-        self.assertEqual(kwargs["scope"], ["session", "trace", "session_context"])
+            provider = make_provider(session_cognee_id="hermes_abc")
+            provider.handle_tool_call("cognee_recall", args)
+            return fake.only_call("recall")
+
+    def test_the_tool_sends_the_graph_scope_with_dataset_and_session(self):
+        kwargs = self._recall_kwargs({"query": "q"})
+        self.assertEqual(kwargs["scope"], ["graph"])
         self.assertEqual(kwargs["datasets"], ["hermes"])
+        # The session id travels so the 1.6.0 graph item carries the history;
+        # an explicit graph scope never returns raw session entries.
+        self.assertEqual(kwargs["session_id"], "hermes_abc")
+        self.assertIsNone(kwargs["query_type"])
 
-    def test_legacy_session_scope_with_layers_off(self):
+    def test_a_legacy_scope_argument_never_changes_the_request(self):
+        baseline = self._recall_kwargs({"query": "q"})
+        for legacy in ("auto", "session", "graph", "GRAPH", "SESSION", None, ""):
+            with self.subTest(scope=legacy):
+                kwargs = self._recall_kwargs({"query": "q", "scope": legacy})
+                self.assertEqual(kwargs, baseline)
+                self.assertEqual(kwargs["scope"], ["graph"])
+
+    def test_search_type_is_the_callers_override(self):
+        kwargs = self._recall_kwargs({"query": "q", "scope": "session", "search_type": "CHUNKS"})
+        self.assertEqual(kwargs["query_type"], "CHUNKS")
+        self.assertEqual(kwargs["scope"], ["graph"])
+
+    def test_the_tool_schema_has_no_scope_argument(self):
+        with fake_backend():
+            provider = make_provider()
+            schema = next(s for s in provider.get_tool_schemas() if s["name"] == "cognee_recall")
+        self.assertNotIn("scope", schema["parameters"]["properties"])
+        for retired in ("session memory", "scope"):
+            self.assertNotIn(retired, schema["description"].lower())
+
+
+class TestNoCodePathReadsTheSessionCache(unittest.TestCase):
+    """Every read path — the per-prompt prefetch with and without the code
+    lane, the explicit tool under every legacy scope, and the code-search tool
+    — states ``["graph"]`` or ``["code"]``. Nothing requests ``session``,
+    ``trace``, ``session_context`` or ``auto``, and nothing leaves the scope to
+    the server."""
+
+    def test_every_read_path_states_graph_or_code(self):
         with fake_backend() as fake:
-            provider = make_provider(config={"recall_session_layers": False})
-            provider.handle_tool_call("cognee_recall", {"query": "q", "scope": "session"})
-            kwargs = fake.only_call("recall")
-        self.assertEqual(kwargs["scope"], "session")
-        self.assertIsNone(kwargs["datasets"])
+            provider = make_provider(config=_WITH_CODE)
+            _prefetch(provider)
+            _prefetch(provider, _CODE_QUERY)
+            for legacy in ("auto", "session", "graph", None):
+                provider.handle_tool_call("cognee_recall", {"query": "q", "scope": legacy})
+            provider.handle_tool_call(
+                "cognee_code_search",
+                {"operation": "query_facts", "name": "process_payment", "dataset": "codebase-x"},
+            )
+            calls = fake.kwargs_for("recall")
+        self.assertGreaterEqual(len(calls), 8, calls)
+        _assert_graph_only(self, calls)
+
+    def test_the_sdk_transport_states_graph_or_code_too(self):
+        with fake_cognee() as fake:
+            backend = SdkBackend()
+            provider = make_provider(backend=backend, config=_WITH_CODE)
+            try:
+                _prefetch(provider, _CODE_QUERY)
+                provider.handle_tool_call("cognee_recall", {"query": "q", "scope": "session"})
+                calls = fake.kwargs_for("recall")
+            finally:
+                backend.close(unregister=False)
+        _assert_graph_only(self, calls)
+
+    def test_no_source_line_requests_a_session_scope(self):
+        # Belt and braces for the runtime tests above: the package must not even
+        # spell a session-cache request. Prose (docstrings saying what is *not*
+        # requested) uses backticks, not quoted literals, so it does not match.
+        import re
+
+        forbidden = re.compile(
+            r"""["']session_context["']|["']trace["']|context_profile"""
+            r"""|scope=["'](auto|session)["']|\[["']session["']"""
+        )
+        package = ROOT / "cognee_integration_hermes"
+        offenders = [
+            f"{path.relative_to(ROOT)}:{number}: {line.strip()}"
+            for path in sorted(package.glob("*.py"))
+            for number, line in enumerate(path.read_text().splitlines(), 1)
+            if forbidden.search(line)
+        ]
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":
