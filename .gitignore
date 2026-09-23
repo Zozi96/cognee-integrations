@@ -104,3 +104,7 @@ coverage/
 
 # OpenClaw Plugin Inspector output (regenerate by rerunning the inspector)
 integrations/openclaw/reports/
+
+# Local cognee databases (created when running examples/workflows locally)
+.cognee_system/
+.cognee_data/

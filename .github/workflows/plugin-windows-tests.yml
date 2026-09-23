@@ -46,24 +46,11 @@ jobs:
     env:
       COGNEE_TEST_SUITE: ${{ matrix.suite }}
     steps:
-      # The repo has deeply-nested committed artifacts (n8n_workflows LanceDB
-      # files) whose paths exceed Windows' MAX_PATH; sparse-checkout the trees
-      # this job needs and allow long paths so checkout cannot break.
-      - name: Allow long paths for checkout
-        run: git config --global core.longpaths true
-
+      # Full checkout with Git's default path limit, same as a user's clone. Do
+      # not enable core.longpaths or sparse-checkout here: that once hid paths
+      # that broke every Windows marketplace install (see plugin-clean-install.yml).
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          # integrations/tests holds the shared suite; the three plugin trees hold
-          # the hook scripts it imports and runs as subprocesses; conformance holds
-          # the session-id case table the suite checks every host against.
-          sparse-checkout: |
-            integrations/claude-code
-            integrations/codex
-            integrations/antigravity
-            integrations/tests
-            integrations/conformance
 
       - name: Set up Python
         uses: actions/setup-python@v5
