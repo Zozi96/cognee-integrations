@@ -10,6 +10,27 @@ Default session dataset: `agent_sessions`. Default local server port: `8011`.
 
 Tests live in the shared Claude/Codex suite, Hermes `test_config_contract.py`, and OpenClaw unit tests. This replaces the obsolete config-file contract proposed in #169.
 
+## Default user password (cognee >= 1.6.0)
+
+cognee 1.6.0 no longer bakes in a default-user password. The API server creates
+the default user at startup only when `DEFAULT_USER_PASSWORD` is set (email from
+`DEFAULT_USER_EMAIL`, default `default_user@example.com`); it sets the password
+once and never rewrites an existing user's password. A server started without the
+variable has no default login, and `POST /api/v1/auth/login` answers HTTP 400
+`This user does not have a password. Use API key authentication.` (a wrong
+password is HTTP 400 `LOGIN_BAD_CREDENTIALS`). cognee's own docker-compose sets
+`DEFAULT_USER_PASSWORD=${DEFAULT_USER_PASSWORD:-default_password}`.
+
+| Situation | What to do |
+|---|---|
+| Plugin boots a local server (Claude Code, Codex, OpenClaw and Hermes Agent local mode) | Nothing: the server is started with `DEFAULT_USER_EMAIL=default_user@example.com` / `DEFAULT_USER_PASSWORD=default_password` — the same literals from every plugin, since they share one server and one database — and the plugin logs in with that pair. Exporting `DEFAULT_USER_PASSWORD` / `DEFAULT_USER_EMAIL` yourself wins (set only if absent). |
+| Externally managed server | Start it with `DEFAULT_USER_PASSWORD` (and `DEFAULT_USER_EMAIL`) set to what the plugin logs in with, or skip the login entirely with `COGNEE_API_KEY`. |
+| Logging in as another user | `COGNEE_USER_EMAIL` / `COGNEE_USER_PASSWORD` (OpenClaw: `username` / `password`) still select which user the plugin logs in as and are never forwarded to the server as the default user. A non-default user must already exist on the server; these variables do not create one. |
+
+Against a server the plugin did not start, the plugins report the two 400s above with the
+fix attached (Claude Code / Codex: the owner-key bootstrap error in `hook.log`; OpenClaw: the
+login error; Hermes: a warning at key minting and the first 401 that follows).
+
 ## Python version requirements
 
 cognee itself requires Python 3.10 or newer (up to 3.14). What that means for each

@@ -39,19 +39,13 @@ Knowledge is organized into three categories via `node_set`:
 
 Use the wrapper below: it queries the server, scoped to the **plugin's dataset** (`$COGNEE_PLUGIN_DATASET`, default `agent_sessions` — the same dataset all plugin writes target, so unrelated datasets don't bleed in), and resolves the endpoint, session and API key the way the hooks do.
 
-**One broad search is usually enough** — the `UserPromptSubmit` hook already injects session/trace/graph context every turn, so avoid running many targeted searches (each is an extra permission prompt for the user).
+**One broad search is usually enough** — the `UserPromptSubmit` hook already injects the graph's memory (and code-graph facts) every turn, so avoid running many targeted searches (each is an extra permission prompt for the user).
 
 ### Search (server-first)
 
 ```bash
-# session cache + permanent graph (default)
-"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS"
-
-# permanent graph only
-"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10 --graph
-
-# current session only
-"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10 --session
+# permanent knowledge graph (the default; --graph is the same)
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10
 
 # deterministic code graph (indexed repos only — see the cognee-code skill)
 "${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "MyClass" 10 --code
@@ -135,20 +129,21 @@ switch retires the session. Offer a one-off search instead:
    "${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "$ARGUMENTS" 10 --graph --dataset-id <id>
    ```
 
-   The wrapper forces graph scope and drops the session id for any dataset
-   other than the active one (session history is bound to the active dataset),
-   noting so on stderr. The active dataset, the Cognee session and where
+   The wrapper drops the session id for any dataset other than the active one
+   (the session is bound to the active dataset). The active dataset, the Cognee session and where
    writes go are untouched. If the user then wants that dataset for the rest
    of the session, point them to `/cognee-memory:cognee-switch-datasets`.
 
 ## Understanding results
 
-Results include a `_source` field:
-- `"session"` — from the session cache (current conversation)
-- `"graph"` — from the permanent knowledge graph
+Results carry a `source` field:
+- `"graph"` — from the permanent knowledge graph. On cognee 1.6.0 and later the
+  item's `text` is the full prompt cognee would have answered from: this
+  session's history, the question with the retrieved context, and the guidance
+  block.
 - `"code"` — deterministic facts from an indexed repository's code graph
 
-Session entries tagged with `[category:agent]` are automatic tool call logs.
+The session cache is never a search source; it reaches the graph through the sync.
 
 ## Decision table
 
@@ -158,6 +153,6 @@ Session entries tagged with `[category:agent]` are automatic tool call logs.
 | User explicitly says "search cognee" | `cognee-search.sh "<query>"` (server-first) |
 | "what does the codebase do" / "what did we do last time" | `cognee-search.sh "<query>" 10 --graph` |
 | Need a specific category | use the `node_name` curl form above (`["user_context"\|"project_docs"\|"agent_actions"]`) |
-| Auto context insufficient | `cognee-search.sh "<query>" 10 --session` |
+| Auto context insufficient | `cognee-search.sh "<query>" 10` (memory is graph + code only; the session cache is written, never searched) |
 | **Server says empty and the user is recalling something** | **Offer the other readable datasets (`list-datasets.py --others` + AskUserQuestion), then `cognee-search.sh "<query>" 10 --graph --dataset-id <id>`** |
 | **Result empty but you expect content** | **Ground-truth via the credential-resolving `curl` above before concluding "not found"** |

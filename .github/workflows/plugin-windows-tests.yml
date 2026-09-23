@@ -35,9 +35,10 @@ on:
 jobs:
   test-host-windows:
     runs-on: windows-latest
-    # Two hosts already take ~21 minutes: closed-port probes wait for Windows
-    # Firewall timeouts. Run hosts in parallel so adding a third stays bounded.
-    timeout-minutes: 30
+    # One host takes close to 30 minutes on its own: closed-port probes wait for
+    # Windows Firewall timeouts. Hosts run in parallel, and the ceiling leaves
+    # headroom so a slow runner is a slow run, not a cancelled one.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -54,13 +55,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # integrations/tests holds the shared suite; the other three hold the
-          # hook scripts it imports and runs as subprocesses.
+          # integrations/tests holds the shared suite; the three plugin trees hold
+          # the hook scripts it imports and runs as subprocesses; conformance holds
+          # the session-id case table the suite checks every host against.
           sparse-checkout: |
             integrations/claude-code
             integrations/codex
             integrations/antigravity
             integrations/tests
+            integrations/conformance
 
       - name: Set up Python
         uses: actions/setup-python@v5

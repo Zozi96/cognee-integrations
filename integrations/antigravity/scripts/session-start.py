@@ -118,7 +118,7 @@ _FALLBACK_VENV_MIN_PYTHON = (3, 10)
 # refusal reaches the user as a systemMessage (the worker that hits it runs
 # detached, with nothing it prints visible). Cleared once a venv is ready.
 _HOST_PYTHON_MARKER = _GLOBAL_STATE_DIR / "host-python-unsupported.json"
-_PINNED_COGNEE_VERSION = "1.5.4"
+_PINNED_COGNEE_VERSION = "1.6.0"
 _INSTALL_TIMEOUT_SECONDS = float(os.environ.get("COGNEE_INSTALL_TIMEOUT", "") or 600.0)
 
 # Maps a configured backend provider env var to the cognee package "extra" that
@@ -298,7 +298,8 @@ def _venv_cognee_version() -> str:
 
 
 # One distribution per extra whose presence in the venv proves that extra's
-# drivers are installed (verified against cognee 1.5.3's optional-dependencies).
+# drivers are installed (verified against cognee 1.6.0's optional-dependencies:
+# fastembed and codegraph are empty extras there, their packages being core).
 # Probing the venv is deliberately preferred over recording installed extras in
 # venv-ready.json: that marker is shared with plugins that don't know about
 # extras (codex/openclaw), whose rewrites would wipe the record and force a
@@ -708,6 +709,15 @@ def _ensure_local_server_running(
         # We are spawning the server, so run it in agent mode: it tears itself
         # down once all registered agents disconnect.
         server_env["COGNEE_AGENT_MODE"] = "true"
+        # cognee >= 1.6.0 creates the default user at startup only when
+        # DEFAULT_USER_PASSWORD is set, and never rewrites a stored password. Hand
+        # the server the well-known local credentials so a fresh install gets the
+        # same default user it always had and the owner-key bootstrap below can log
+        # in. The server binds localhost only. setdefault: an operator's own
+        # DEFAULT_USER_* export wins. COGNEE_USER_EMAIL/COGNEE_USER_PASSWORD still
+        # pick the user the plugin logs in as; a non-default user must already exist.
+        server_env.setdefault("DEFAULT_USER_EMAIL", _LOCAL_DEFAULT_USER_EMAIL)
+        server_env.setdefault("DEFAULT_USER_PASSWORD", _LOCAL_DEFAULT_USER_PASSWORD)
         # The server's console output must not inherit this worker's stdio
         # (bootstrap.log — that is how it reached gigabytes: every line the
         # server printed for as long as it ran), but it must not vanish either:
@@ -777,6 +787,40 @@ def _normalize_service_url(service_url: str) -> str:
     return str(service_url or "").strip().rstrip("/")
 
 
+# The credentials a server booted by this plugin is given (DEFAULT_USER_EMAIL /
+# DEFAULT_USER_PASSWORD) and the ones config.py logs in with by default. They
+# must agree, or a fresh install cannot mint its owner API key.
+_LOCAL_DEFAULT_USER_EMAIL = "default_user@example.com"
+_LOCAL_DEFAULT_USER_PASSWORD = "default_password"
+_NO_PASSWORD_MARKER = "does not have a password"
+_BAD_CREDENTIALS_MARKER = "LOGIN_BAD_CREDENTIALS"
+
+
+def _login_failure_message(status: int, body: str) -> str:
+    """One actionable sentence for a failed default-user login.
+
+    cognee >= 1.6.0 creates the default user without a password unless the server
+    was started with DEFAULT_USER_PASSWORD, and logging into such a user answers
+    400 "does not have a password". A server this plugin boots gets the variable
+    itself, so that answer means an externally managed server, whose environment
+    the plugin cannot set.
+    """
+    head = f"default-user login failed ({status}: {body[:200]})."
+    if status == 400 and _NO_PASSWORD_MARKER in body:
+        return (
+            f"{head} The server's default user has no password: cognee >= 1.6.0 "
+            "creates none unless the server is started with DEFAULT_USER_PASSWORD set. "
+            "Start the server with DEFAULT_USER_PASSWORD set to the same value as "
+            "COGNEE_USER_PASSWORD, or set COGNEE_API_KEY to skip the login."
+        )
+    if status == 400 and _BAD_CREDENTIALS_MARKER in body:
+        return (
+            f"{head} The server rejected COGNEE_USER_EMAIL/COGNEE_USER_PASSWORD; point "
+            "them at a user that exists on that server, or set COGNEE_API_KEY."
+        )
+    return f"{head} Set COGNEE_USER_EMAIL/COGNEE_USER_PASSWORD correctly, or set COGNEE_API_KEY."
+
+
 async def _login_default_user_for_owner_api_key(service_url: str, config: dict) -> str:
     base = _normalize_service_url(service_url)
     email = config.get("user_email", "")
@@ -789,11 +833,7 @@ async def _login_default_user_for_owner_api_key(service_url: str, config: dict) 
         timeout=30.0,
     )
     if status != 200:
-        raise RuntimeError(
-            "default-user login failed "
-            f"({status}: {body[:200]}). "
-            "Set COGNEE_USER_EMAIL/COGNEE_USER_PASSWORD correctly."
-        )
+        raise RuntimeError(_login_failure_message(status, body))
     login_data = json.loads(body) if body else {}
     jwt = str(login_data.get("access_token", "") or "")
     if not jwt:

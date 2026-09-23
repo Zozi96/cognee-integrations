@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Search Cognee's memory (session or permanent graph).
+# Search Cognee's memory: the knowledge graph, or a repository's code graph.
 #
 # Usage:
-#   cognee-search.sh <query> [top_k] [--session | --graph]
+#   cognee-search.sh <query> [top_k] [--graph]
 #   cognee-search.sh <query> [top_k] --code [--dataset <name>] [--code-query '<json>']
 #   cognee-search.sh <query> [top_k] --graph --dataset-id <uuid>
 #
-# --session: search session cache only
-# --graph:   search permanent knowledge graph only
+# --graph:   search the permanent knowledge graph (the default; the flag is
+#            accepted for callers that spell it out)
 # --code:    deterministic code-graph search (cognee >= 1.5.3). Query text is
 #            the seed; --code-query selects an exact operation instead, e.g.
 #            '{"operation": "impact_analysis", "targets": ["process_payment"]}'
@@ -19,11 +19,11 @@
 #            resolves among datasets this identity OWNS; anything else must be
 #            addressed by UUID.
 # --dataset-id: search another dataset by UUID (the cross-dataset picker flow:
-#            list-datasets.py names the candidates). Searching a dataset other
-#            than the launch's active one is graph-only — session history is
-#            bound to the active dataset — so the scope is forced to graph and
-#            the session id is dropped, with a note on stderr.
-# No flag:   search session first, then graph if empty
+#            list-datasets.py names the candidates). A dataset other than the
+#            launch's active one is read without the session id, which is bound
+#            to the active dataset.
+# No flag:   same as --graph. Memory is read from the graph and the code graph
+#            only; the session cache is written, never searched.
 #
 # Configuration:
 #   Session ID and dataset come from this launch's record (~/.cognee-plugin/
@@ -172,7 +172,7 @@ ACTIVE_DATASET_IDS="$DATASET_IDS"
 
 QUERY="${1:-}"
 TOP_K="${2:-5}"
-MODE="auto"
+MODE="graph"
 CODE_QUERY=""
 DATASET_EXPLICIT=""
 
@@ -181,7 +181,6 @@ _args=("$@")
 _i=0
 while [ $_i -lt ${#_args[@]} ]; do
     case "${_args[$_i]}" in
-        --session) MODE="session" ;;
         --graph)   MODE="graph" ;;
         --code)    MODE="code" ;;
         --code-query)
@@ -218,10 +217,9 @@ if [ -z "$QUERY" ]; then
     exit 1
 fi
 
-# A dataset other than the active one has none of this session's history, and
-# the server rejects a session bound to one dataset being read against another
-# — so a foreign target is a graph-only read with no session id. The active
-# dataset named by hand (its name or one of its UUIDs) keeps the full scope.
+# The session id is bound to the active dataset, and the server rejects it
+# against another one — so a foreign target is read without it. The active
+# dataset named by hand (its name or one of its UUIDs) keeps the session id.
 FOREIGN=""
 if [ -n "${DATASET_EXPLICIT:-}" ] && [ "$MODE" != "code" ]; then
     FOREIGN="1"
@@ -230,20 +228,16 @@ if [ -n "${DATASET_EXPLICIT:-}" ] && [ "$MODE" != "code" ]; then
         *",${DATASET},"*) FOREIGN="" ;;
     esac
     if [ -n "$FOREIGN" ]; then
-        if [ "$MODE" != "graph" ]; then
-            echo "[cognee-search] dataset '$DATASET' is not this session's active dataset (${ACTIVE_DATASET:-unknown}) — searching its knowledge graph only (no session history there)" >&2
-        fi
-        MODE="graph"
         SESSION_ID=""
     fi
 fi
 
-# Search scope from MODE
+# Search scope from MODE. Graph and code only: the session cache is never a
+# search source (its history reaches the model through the graph item's
+# prompt on cognee >= 1.6.0, and through the sync bridge before that).
 case "$MODE" in
-    session) SCOPE='["session"]' ;;
-    graph)   SCOPE='["graph"]' ;;
-    code)    SCOPE='["code"]' ;;
-    *)       SCOPE='["session", "graph"]' ;;
+    code) SCOPE='["code"]' ;;
+    *)    SCOPE='["graph"]' ;;
 esac
 
 # Server-first: the running server (/api/v1/recall) is the source of truth.

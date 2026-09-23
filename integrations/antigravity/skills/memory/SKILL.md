@@ -44,7 +44,7 @@ ${COGNEE_ANTIGRAVITY_PLUGIN_ROOT:-$HOME/.gemini/config/plugins/cognee}/scripts/c
 
 For a whole repository (cross-file calls/imports, impact analysis), use the **codebase** skill instead. The script POSTs directly to `/api/v1/remember`. A `{"ok": true}` response means the server accepted the data. An error response means the server rejected or failed the request — check `COGNEE_API_KEY` and server logs; do **not** re-run or conclude the data wasn't stored without confirming against the server.
 
-**Background by default + eventual consistency**: the wrapper submits with `run_in_background=true` (so a large cognify never holds one request open past the cloud's ~10-min request ceiling). The POST returns once the work is **enqueued**, with `dataset_id` and `pipeline_run_id`; `status: "running"` means *submitted, not yet in the permanent graph*. The session cache is searchable immediately, but the graph is queryable only after the cognify pipeline **completes**.
+**Background by default + eventual consistency**: the wrapper submits with `run_in_background=true` (so a large cognify never holds one request open past the cloud's ~10-min request ceiling). The POST returns once the work is **enqueued**, with `dataset_id` and `pipeline_run_id`; `status: "running"` means *submitted, not yet in the permanent graph*. The graph is queryable only after the cognify pipeline **completes**; until then a search will not find the new content.
 
 By default the wrapper then waits a short, bounded time (`COGNEE_REMEMBER_WAIT_SECONDS`, default `8`) polling `/api/v1/datasets/status` and adds `"queryable": true|false` + `"wait_outcome"` to the result. `queryable: true` means it's now in the graph and an immediate recall will find it. If `queryable: false`, check `wait_outcome`: `"timeout"` means it's still processing (recall later — not an error), `"errored"` means the cognify failed (check server logs), `"unknown"` means completion couldn't be confirmed (e.g. an older server without the status route). Set `COGNEE_REMEMBER_WAIT_SECONDS=0` to skip the wait, or `COGNEE_REMEMBER_BACKGROUND=false` for a fully synchronous, immediately-queryable write (small content only — large content risks the request ceiling).
 
@@ -80,8 +80,9 @@ ${COGNEE_ANTIGRAVITY_PLUGIN_ROOT:-$HOME/.gemini/config/plugins/cognee}/scripts/c
 
 It resolves the endpoint, the session and the API key the way the hooks do
 (launch record → `COGNEE_API_KEY` → the auto-minted `api_key.json`), so it
-authenticates correctly in **both** local and cloud mode. Drop `--graph` to
-search the session cache and the graph, or pass `--session` for the session only.
+authenticates correctly in **both** local and cloud mode. `--graph` is the default and may be
+omitted; memory is read from the knowledge graph (and the code graph via `--code`)
+only — the session cache is written, never searched.
 
 An empty result from the server is authoritative — the server searched and found
 nothing.

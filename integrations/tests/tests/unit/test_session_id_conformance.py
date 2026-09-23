@@ -22,7 +22,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from utils.suites import CLAUDE, CODEX
 
 

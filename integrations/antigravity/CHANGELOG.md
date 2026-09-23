@@ -7,6 +7,74 @@ package version.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0]
+
+### Changed
+- **Bundled cognee is 1.6.0** (was 1.5.4; `_PINNED_COGNEE_VERSION`). The shared
+  `~/.cognee-plugin/venv` is upgraded on the next local-mode session start, which
+  runs that release's migrations. 1.6.0 made `fastembed` and `onnxruntime` core
+  dependencies (the `fastembed` and `codegraph` extras are now empty shims), so the
+  venv grows and a cold install takes longer. Search and recall now answer an
+  unresolvable dataset name, or a dataset without a graph yet, with `404` instead
+  of an empty list; the explicit search path (`cognee-search.sh`) treats that as an
+  empty result rather than an error, as the prompt hook already did.
+- **One recall request per prompt, and the memory block is what the LLM would have
+  been given (SDK-741, cognee #5085).** With `only_context=true`, a completion search
+  type on cognee 1.6.0 returns one item per dataset whose `text` is the full LLM
+  input: the conversation history for the session, the question with the retrieved
+  graph context rendered through the retriever's template, and the session guidance
+  block (a separate `system_prompt` field carries the task template and is ignored).
+  `session-context-lookup.py` therefore no longer fans out over the `session`,
+  `trace`, `session_context` and `graph` scopes, in HTTP mode and in the in-process
+  `cognee.recall` mode alike: the single request is `scope=["graph"]`,
+  `HYBRID_COMPLETION`, `only_context=true`, with the session id — kept explicit
+  because the server's `auto` scope would add raw session entries next to the prompt
+  (or short-circuit the graph on a session hit) and an unpinned type lets the router
+  pick `CHUNKS`, which builds no prompt. The item's `text` is injected whole under
+  `=== Cognee memory ===` (label `[cognee-memory]`, formerly `[graph-snapshot]`); the
+  1500-character cap is gone, since the context sits in the middle of that string and
+  the guidance at its end, so a cut removed exactly what memory is for — `top_k`
+  bounds the size server-side. The header keeps its hit-count wording;
+  `last_recall.json` keeps all five `hits` keys, the retired ones at zero, and
+  `per_scope` lists only the scopes dispatched. The optional code-graph lane is
+  unchanged and still runs only on identifier-shaped prompts. Against a pre-1.6.0
+  server the item holds the bare retrieval context and is rendered the same way; the
+  session layers are then not injected.
+
+- **Automatic improves run at most every 30 minutes** per session (was 10):
+  `COGNEE_IMPROVE_COOLDOWN` now defaults to `1800`. The idle and auto triggers honour
+  it, and a failed attempt arms the same window as a backoff; the session-end sync,
+  the sync skill and a dataset switch still improve regardless.
+- **Search is graph and code only.** `cognee-search.sh` no longer has a `--session`
+  mode and no longer defaults to session-then-graph; every search is a graph-scope
+  recall (or `--code`). The session cache is written and bridged, never searched:
+  on cognee 1.6.0 the graph item's prompt already carries this session's history.
+- **The "from past sessions" count is gone** from the memory header, the status
+  line and `last_recall.json` (`cross_session_hits`). It guessed provenance by
+  looking for the session id inside each graph passage; the 1.6.0 memory item is one
+  rendered prompt that mixes history, retrieved context and guidance, so no substring
+  can say where a fact came from, and memory is graph-only recall now anyway.
+
+### Fixed
+- **Fresh installs against cognee 1.6.0 could not mint their owner API key
+  (SDK-740).** cognee 1.6.0 stopped baking `default_password` into the default user:
+  the server creates that user at startup only when `DEFAULT_USER_PASSWORD` is set,
+  sets the password once, and never rewrites a stored one. The owner-key bootstrap
+  logs in as `default_user@example.com` / `default_password`, so on a fresh venv the
+  login answered `400 "This user does not have a password"` and the plugin never got
+  a key. The server this plugin boots is now started with
+  `DEFAULT_USER_EMAIL=default_user@example.com` and
+  `DEFAULT_USER_PASSWORD=default_password` (the literals every Cognee plugin shares,
+  since they all share one server and one database), `setdefault` so an operator's
+  own `DEFAULT_USER_*` export wins. Existing installs are untouched: their user row
+  already holds that password. `COGNEE_USER_EMAIL`/`COGNEE_USER_PASSWORD` still pick
+  the user the plugin logs in as, and a non-default user must already exist. Against
+  a server the plugin did not start, the two 400 answers now produce an actionable
+  message (start the server with `DEFAULT_USER_PASSWORD` matching
+  `COGNEE_USER_PASSWORD`, or set `COGNEE_API_KEY`) instead of the generic "set the
+  credentials correctly". README gains a paragraph on where the default user's
+  password comes from and what to set for an externally managed server.
+
 ## [1.5.2]
 
 ### Added
