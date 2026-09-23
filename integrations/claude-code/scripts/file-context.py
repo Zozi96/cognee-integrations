@@ -52,6 +52,7 @@ from _plugin_common import (  # noqa: E402
     elapsed_ms,
     get_session_key,
     hook_log,
+    is_observer_child,
     load_resolved,
     quiet_hook_output,
     read_connection_state,
@@ -521,6 +522,8 @@ def run(payload: dict) -> str:
 
 
 def main() -> None:
+    if is_observer_child():
+        return
     payload_raw = sys.stdin.read()
     if not payload_raw.strip():
         return

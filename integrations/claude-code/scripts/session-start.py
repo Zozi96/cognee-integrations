@@ -48,6 +48,7 @@ from _plugin_common import (
     ensure_launch_record,
     get_session_key,
     hook_log,
+    is_observer_child,
     probe_health,
     quiet_hook_output,
     resolve_session_key_from_payload,
@@ -1751,6 +1752,101 @@ async def _run_bootstrap(bootstrap: dict) -> None:
         hook_log("bootstrap_failed", {"error": str(exc)[:300]})
 
 
+def _apply_observer(config: dict, target_url: str) -> dict:
+    """Decide the Claude observer for this launch, apply its env, start the shim.
+
+    Returns the decision (``_observer.resolve_observer``) extended with
+    ``shim_running``. Never raises: the observer is a convenience over the
+    regular local mode, and a failure here must leave that mode intact —
+    except under ``COGNEE_LLM_OBSERVER=true``, whose refusal is recorded so
+    the user learns why the server has no LLM.
+    """
+    try:
+        from _observer import apply_observer_env, ensure_observer_running, resolve_observer
+
+        decision = resolve_observer(config)
+        if decision.get("error"):
+            hook_log("observer_refused", {"error": decision["error"]})
+        if not decision.get("active"):
+            hook_log(
+                "observer_skipped",
+                {"reason": decision.get("reason", ""), "setting": decision.get("setting", "")},
+            )
+            decision["shim_running"] = False
+            return decision
+        applied = apply_observer_env(decision)
+        running = ensure_observer_running(decision, cognee_url=target_url, wait=2.0)
+        decision["shim_running"] = running
+        hook_log(
+            "observer_applied",
+            {
+                "claude": decision.get("claude", ""),
+                "model": decision.get("model", ""),
+                "endpoint": decision.get("endpoint", ""),
+                "embedding": os.environ.get("EMBEDDING_PROVIDER", ""),
+                "applied": sorted(applied),
+                "shim_running": running,
+            },
+        )
+        if not running:
+            hook_log("observer_shim_start_failed", {"endpoint": decision.get("endpoint", "")})
+        return decision
+    except Exception as exc:
+        hook_log("observer_error", {"error": str(exc)[:200]})
+        return {"active": False, "reason": "error", "shim_running": False}
+
+
+def _record_observer(decision: dict) -> None:
+    """Note the observer on this launch's record (read by the status line + doctor)."""
+    try:
+        from _plugin_common import _read_map_record, _write_map_record, get_session_key
+
+        host_key = get_session_key()
+        if not host_key:
+            return
+        record = _read_map_record(host_key)
+        if not record:
+            return
+        record["llm_observer"] = {
+            "active": bool(decision.get("active")),
+            "model": str(decision.get("model") or ""),
+            "endpoint": str(decision.get("endpoint") or ""),
+        }
+        _write_map_record(host_key, record)
+    except Exception as exc:
+        hook_log("observer_record_failed", {"error": str(exc)[:200]})
+
+
+def _with_observer_note(output: dict, observer: dict) -> dict:
+    """Tell the user (systemMessage) when the server's LLM is the Claude subscription,
+    or why a requested observer could not be honoured."""
+    note = ""
+    if observer.get("active"):
+        note = (
+            "LLM: Claude Code (observer) — the local server's cognify/improve calls run on "
+            f"your Claude subscription via `claude -p` (model {observer.get('model')}); "
+            "embeddings run locally on fastembed. No LLM_API_KEY needed. "
+            "Set LLM_API_KEY in ~/.cognee/.env to use a provider of your own instead, "
+            "or COGNEE_LLM_OBSERVER=false to turn this off."
+        )
+        if not observer.get("shim_running"):
+            note += (
+                " Warning: the observer shim did not start — check "
+                "~/.cognee-plugin/observer/observer.log; the server has no LLM until it runs."
+            )
+    elif observer.get("error"):
+        note = f"Cognee Memory: {observer['error']}"
+    if not note:
+        return output
+    result = dict(output or {})
+    hso = dict(result.get("hookSpecificOutput") or {})
+    hso.setdefault("hookEventName", "SessionStart")
+    existing = str(hso.get("systemMessage") or "").strip()
+    hso["systemMessage"] = f"{existing}\n\n{note}" if existing else note
+    result["hookSpecificOutput"] = hso
+    return result
+
+
 def _session_start_guidance(mode: str, dataset: str, session_id: str, ready: bool) -> dict:
     if ready:
         message = (
@@ -1961,6 +2057,15 @@ async def _start(payload: dict | None = None) -> dict:
     if api_key:
         os.environ["COGNEE_API_KEY"] = api_key
 
+    # Claude observer: local mode with no LLM key of its own runs the server's
+    # LLM calls through Claude Code (`claude -p --safe-mode`) behind a loopback
+    # OpenAI-compatible shim, with embeddings on fastembed. Decided and applied
+    # HERE, before the install/boot below: the install reads EMBEDDING_PROVIDER
+    # to add the fastembed extra, and the server inherits the provider variables
+    # at spawn. The shim is started detached now so the server's first LLM call
+    # (and the watcher's key check) find it listening.
+    observer = _apply_observer(config, target_url)
+
     # NOTE: the local server's LLM_API_KEY health is deliberately NOT judged here.
     # A hook-env read (config's llm_api_key / OPENAI_API_KEY) is blind to a key that
     # lives in cognee's own config or a .env the server loads, so a session launched
@@ -2010,6 +2115,10 @@ async def _start(payload: dict | None = None) -> dict:
         dataset=str(config.get("dataset", "") or "").strip(),
         host_pid=_find_claude_parent_pid(),
     )
+    # The launch record is what the status line and doctor read — neither has
+    # this process's environment — so the observer decision lands on it here,
+    # once the record exists.
+    _record_observer(observer)
     from _project_memory import begin as begin_project_memory
 
     begin_project_memory(get_dataset(config), session_id, cwd)
@@ -2127,10 +2236,12 @@ async def _start(payload: dict | None = None) -> dict:
     )
 
     ready = server_live or server_ready_hint(str(config.get("base_url", "") or ""))
-    return _session_start_guidance(mode, dataset, session_id, ready)
+    return _with_observer_note(_session_start_guidance(mode, dataset, session_id, ready), observer)
 
 
 def main():
+    if is_observer_child():
+        return
     # First run: leave a commented ~/.cognee/.env template so one-time config
     # has a documented file to land in. Values (if any) were already loaded
     # into os.environ when _plugin_common was imported.

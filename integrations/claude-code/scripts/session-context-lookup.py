@@ -33,6 +33,7 @@ from _plugin_common import (
     elapsed_ms,
     get_session_key,
     hook_log,
+    is_observer_child,
     load_resolved,
     mark_server_ready,
     notify,
@@ -834,6 +835,8 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
 
 
 def main():
+    if is_observer_child():
+        return
     payload_raw = sys.stdin.read()
     if not payload_raw.strip():
         return

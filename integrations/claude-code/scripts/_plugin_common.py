@@ -1458,6 +1458,20 @@ def notify(msg: str) -> None:
             hook_log("activity_log_write_failed", {"error": str(exc)[:200]})
 
 
+OBSERVER_CHILD_ENV = "COGNEE_OBSERVER_CHILD"
+
+
+def is_observer_child() -> bool:
+    """True inside a ``claude -p`` process the observer shim spawned.
+
+    The shim runs Claude Code headless to serve the local server's LLM calls
+    (``--safe-mode`` already disables hooks there). If that child ever ran our
+    hooks anyway, each would talk to the same server whose cognify is waiting on
+    the child — a loop. Every hook checks this first and exits silently.
+    """
+    return bool(os.environ.get(OBSERVER_CHILD_ENV, "").strip())
+
+
 @contextmanager
 def quiet_hook_output(label: str):
     """Redirect stdout/stderr to a plugin log while a hook does Cognee work.
@@ -3360,7 +3374,7 @@ _LLM_STATE_MARKER = _PLUGIN_DIR / "llm-state.json"
 LLM_STATES = ("ok", "not_set", "auth_failed")
 
 
-def write_llm_state(state: str, detail: str = "") -> None:
+def write_llm_state(state: str, detail: str = "", reason: str = "") -> None:
     """Record LLM-key health (local mode). Plain atomic overwrite; never raises.
 
     Stamped with the writing session's host key: the key is resolved from the
@@ -3369,6 +3383,10 @@ def write_llm_state(state: str, detail: str = "") -> None:
     land in the machine-wide marker and put a false ✕ on every other session's
     status line (observed: one keyless launch clobbering a validated "ok").
     Readers show a verdict only when it is theirs, or unattributable.
+
+    ``reason`` is an optional status-line label overriding the default
+    ``incorrect_llm_api_key`` for a failed state — e.g. ``claude_not_logged_in``
+    when the LLM is the Claude observer and no key is involved at all.
     """
     if state not in LLM_STATES:
         state = "ok"
@@ -3380,6 +3398,8 @@ def write_llm_state(state: str, detail: str = "") -> None:
             "session_key": get_session_key(),
             "detail": str(detail or "")[:200],
         }
+        if reason:
+            payload["reason"] = str(reason)[:64]
         tmp = _LLM_STATE_MARKER.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, _LLM_STATE_MARKER)

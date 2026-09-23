@@ -5,6 +5,14 @@ from __future__ import annotations
 import os
 
 EVENT_NAMES = {
+    "claude-observer:completion": "observer.completion",
+    "claude-observer:completion_failed": "observer.completion_failed",
+    "claude-observer:handler_exception": "observer.handler_exception",
+    "claude-observer:probe": "observer.probe",
+    "claude-observer:retire": "observer.retire",
+    "claude-observer:signal": "observer.signal",
+    "claude-observer:started": "observer.started",
+    "claude-observer:stopped": "observer.stopped",
     "clear-transcript-context:claude_context_cleared": "transcript.cleared",
     "clear-transcript-context:clear_context_failed": "transcript.failed",
     "clear-transcript-context:clear_context_invalid_payload": "transcript.invalid_payload",
@@ -146,6 +154,12 @@ EVENT_NAMES = {
     "hook:missing_payload_session_id": "missing.payload_session_id",
     "hook:mode_decision": "runtime.decision",
     "hook:no_session_id": "session.session_id",
+    "hook:observer_applied": "observer.applied",
+    "hook:observer_error": "observer.error",
+    "hook:observer_record_failed": "observer.record_failed",
+    "hook:observer_refused": "observer.refused",
+    "hook:observer_shim_start_failed": "observer.shim_start_failed",
+    "hook:observer_skipped": "observer.skipped",
     "hook:pending_unlink_failed": "pending.unlink_failed",
     "hook:plugin_agent_provisioned": "plugin.agent_provisioned",
     "hook:plugin_disconnect_failed": "plugin.disconnect_failed",

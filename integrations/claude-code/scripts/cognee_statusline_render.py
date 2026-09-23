@@ -593,7 +593,12 @@ def _llm_prefix(session_id: str = "") -> str:
         return ""
     state = str(marker.get("llm_state") or "")
     if state in ("not_set", "auth_failed"):
-        return _fail_glyph(_LLM_KEY_REASON)
+        # The watcher may name a more specific cause (e.g. ``claude_not_logged_in``
+        # when the LLM is the Claude observer and there is no key to be incorrect).
+        reason = str(marker.get("reason") or "").strip()
+        if not reason or not reason.replace("_", "").isalnum():
+            reason = _LLM_KEY_REASON
+        return _fail_glyph(reason)
     return ""
 
 

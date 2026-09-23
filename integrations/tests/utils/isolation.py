@@ -46,6 +46,7 @@ ISOLATED_MODULES = (
     "_recall_http",
     "_remember_http",
     "_code_graph",
+    "_observer",
     "cognee_plugin",
     "cognee_statusline_render",
     "doctor",
