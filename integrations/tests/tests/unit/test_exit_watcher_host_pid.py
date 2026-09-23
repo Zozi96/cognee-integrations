@@ -21,6 +21,9 @@ _HOST = {
 
 @pytest.fixture
 def find_host_pid(suite, hook_module, monkeypatch):
+    if suite.name not in _HOST:
+        # Antigravity exports no host pid: its watcher only has the ancestor walk.
+        pytest.skip(f"{suite.name}: the host exports no pid for the exit watcher")
     fn_name, env_var = _HOST[suite.name]
     module = hook_module(suite, "session-start.py")
     fn = getattr(module, fn_name)

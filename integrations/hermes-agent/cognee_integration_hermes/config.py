@@ -28,6 +28,16 @@ DEFAULT_LOCAL_PORT = 8011
 DEFAULT_SERVER_BOOT_TIMEOUT = 600
 DEFAULT_IDENTITY_EMAIL = "hermes-agent@cognee.local"
 DEFAULT_IDENTITY_PASSWORD = "hermes-agent-plugin"
+# The server's *default user*, which the HTTP transport logs in as to mint an
+# API key (COGNEE_USER_EMAIL / COGNEE_USER_PASSWORD override). cognee >= 1.6.0
+# ships no built-in password: the API server creates the default user only when
+# DEFAULT_USER_PASSWORD is set in its environment, so server_bootstrap hands the
+# spawned server these same values (an explicit DEFAULT_USER_* export wins) and
+# the login keeps working exactly as it did on older servers. Kept here rather
+# than in http_backend so the bootstrap can import them without pulling in the
+# transport.
+DEFAULT_USER_EMAIL = "default_user@example.com"
+DEFAULT_USER_PASSWORD = "default_password"
 
 
 def str_to_bool(value: Any, default: bool = False) -> bool:
@@ -221,11 +231,10 @@ def load_config(hermes_home: str | Path | None = None) -> dict[str, Any]:
         "recall_timeout": str_to_int(os.environ.get("COGNEE_RECALL_TIMEOUT"), 120),
         "write_timeout": str_to_int(os.environ.get("COGNEE_WRITE_TIMEOUT"), 120),
         "improve_timeout": str_to_int(os.environ.get("COGNEE_IMPROVE_TIMEOUT"), 300),
-        # Layered recall (parity with the claude-code/codex per-prompt lookup and
-        # openclaw's recallSessionLayers): fan recall out over the session cache,
-        # trace lessons, distilled agent guidance and the graph, each rendered as
-        # its own block. The budget bounds the whole fan-out, cheap scopes first.
-        "recall_session_layers": str_to_bool(os.environ.get("COGNEE_RECALL_LAYERS"), True),
+        # Per-prompt memory block: one graph-scope only_context HYBRID_COMPLETION
+        # recall carrying the session id (on cognee >= 1.6.0 its text already
+        # holds the session history, retrieved context and guidance), plus the
+        # code lane when armed. The budget bounds the whole prefetch.
         "recall_budget": str_to_int(os.environ.get("COGNEE_RECALL_BUDGET"), 20),
         # Memory steer: one system-prompt line asserting Cognee as the preferred,
         # authoritative long-term memory (the COGNEE_PREFER_MEMORY counterpart).
@@ -269,7 +278,6 @@ def load_config(hermes_home: str | Path | None = None) -> dict[str, Any]:
     config["auto_route"] = str_to_bool(config.get("auto_route"), True)
     config["improve_on_end"] = str_to_bool(config.get("improve_on_end"), True)
     config["embedded"] = str_to_bool(config.get("embedded"), False)
-    config["recall_session_layers"] = str_to_bool(config.get("recall_session_layers"), True)
     config["recall_budget"] = max(1, str_to_int(config.get("recall_budget"), 20))
     config["memory_steer"] = str_to_bool(config.get("memory_steer"), True)
     config["memory_hits"] = str_to_bool(config.get("memory_hits"), True)
