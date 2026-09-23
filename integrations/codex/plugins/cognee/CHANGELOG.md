@@ -40,6 +40,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Against a pre-1.6.0 server the item holds the bare retrieval context and is
   rendered the same way; the session layers are then not injected.
 
+- **Automatic improves run at most every 30 minutes** per session (was 10):
+  `COGNEE_IMPROVE_COOLDOWN` now defaults to `1800`. The idle and auto triggers honour
+  it, and a failed attempt arms the same window as a backoff; the session-end sync,
+  the sync skill and a dataset switch still improve regardless.
 - **Search is graph and code only.** `cognee-search.sh` no longer has a `--session`
   mode and no longer defaults to session-then-graph; every search is a graph-scope
   recall (or `--code`). The session cache is written and bridged, never searched:
