@@ -10,7 +10,73 @@ The version must match the `version` field in both `pyproject.toml` and
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0]
+
+### Changed
+- **Pinned cognee is 1.6.0** (was 1.5.4) in `pyproject.toml`, both `plugin.yaml`
+  copies and `uv.lock`. The installed package doubles as the local server the plugin
+  spawns, so a `pip install -U` upgrades that server too and its next boot runs the
+  1.6.0 migrations. 1.6.0 made `fastembed` and `onnxruntime` core dependencies, so
+  the install is larger.
+- **One memory request per prompt, injected as the LLM would have received it
+  (SDK-741, cognee #5085).** With `only_context`, a completion search type on cognee
+  1.6.0 returns one item per dataset whose `text` is the full LLM input: the
+  conversation history for the session, the question with the retrieved graph
+  context rendered through the retriever's template, and the session guidance block
+  (a separate `system_prompt` field carries the task template and is ignored). The
+  per-turn prefetch therefore no longer fans out over the `session_memory`,
+  `trace_lessons` and `agent_guidance` lanes: it makes one `scope=["graph"]`,
+  `HYBRID_COMPLETION`, `only_context=True` recall carrying the session id (plus the
+  `code_graph` lane when a prompt arms it) and injects the item's `text` verbatim,
+  uncapped — the former 500-character cut removed exactly the context and guidance
+  the block is for. The block is `<cognee_memory>` (was `<graph_memory>`); the hit header
+  no longer carries a "beyond this session" count, since the memory item mixes this
+  session's history with retrieved knowledge and nothing can tell them apart. The in-process SDK backend now forwards `scope`
+  and `only_context` to `cognee.recall` so both transports send the same request.
+  Against a pre-1.6.0 server the item holds the bare retrieval context and is
+  injected the same way.
+- **Recall reads the knowledge graph and the code graph only.** The server's
+  session-cache scopes (`session`, `trace`, `session_context`) and its `auto` scope,
+  which folds them in, are noise next to the cognified graph and are no longer
+  requested anywhere. The explicit `cognee_recall` tool lost its `scope` argument
+  (`auto` | `session` | `graph`; a caller still passing one is ignored) and always
+  sends `scope=["graph"]` with the dataset, the caller's `search_type` (or none, for
+  the query classifier) and the session id — on cognee 1.6.0 the graph item's prompt
+  then carries the conversation history, and an explicit graph scope never returns
+  raw session entries. The legacy single `auto`-scope prefetch and its
+  `recall_session_layers` / `COGNEE_RECALL_LAYERS` toggle are gone: the per-prompt
+  memory block above is the only prefetch. Both transports now state `["graph"]`
+  when handed no scope instead of letting the server default to `auto`, and the
+  unused `context_profile` field (a `session_context` rendering option) is dropped
+  from the backend interface. Sessions are still written and still promoted into
+  the graph by `improve()`; they are just not searched as raw entries.
+
+### Fixed
+- **Fresh installs against cognee 1.6.0 could not mint their owner API key
+  (SDK-740).** cognee 1.6.0 stopped baking `default_password` into the default user:
+  the server creates that user at startup only when `DEFAULT_USER_PASSWORD` is set,
+  sets the password once, and never rewrites a stored one, so the login the key
+  bootstrap relies on answered `400 "This user does not have a password"`. The server
+  this plugin spawns is now started with `DEFAULT_USER_EMAIL=default_user@example.com`
+  and `DEFAULT_USER_PASSWORD=default_password` (the literals every Cognee plugin
+  shares, since they all share one server and one database), `setdefault` so an
+  operator's own `DEFAULT_USER_*` export wins. `COGNEE_USER_EMAIL`/`COGNEE_USER_PASSWORD`
+  still select which user the plugin logs in as; a non-default user must already
+  exist. Against a server the plugin did not start, a rejected login now logs a
+  warning that says what to do (start the server with `DEFAULT_USER_PASSWORD`
+  matching `COGNEE_USER_PASSWORD`, or set `COGNEE_API_KEY`), and the first `401`
+  that follows carries the same hint. The README documents it.
+
 ## [1.2.2]
+
+### Added
+- **Catalog installation support.** CLI status and version commands recognize
+  Hermes' catalog marker, report the running plugin version, and direct updates
+  through `hermes plugins update cognee`. Catalog copies skip PyPI checks even
+  with `--check-updates`, and `cognee-hermes-install` refuses to overwrite them,
+  including copies with damaged catalog metadata. Installation and setup docs
+  now distinguish catalog and pip workflows; catalog-name installation is marked
+  as available after acceptance.
 
 ### Changed
 - **The per-prompt recall prefetch dispatches every lane at once.** The layered
@@ -22,6 +88,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
   prefetch costs the slowest lane, not the sum. The rendered blocks keep their
   canonical order whichever lane answers first; a failing lane still never
   discards the others, and the breaker still sees one verdict per turn.
+- **cognee pinned to exactly 1.5.4** (`pyproject.toml`, `plugin.yaml`), up from 1.5.3.
+  The floor moves because code-graph indexing only reads `raw_data` from 1.5.4 on;
+  `content_type="code"`, the `code` recall scope and targeted session invalidation on
+  document delete still date from 1.5.3. The installed package doubles as the local
+  server this plugin spawns, so the pin and the wire contract have to move together.
+- **Connections identify Hermes explicitly.** Agent registration now sends
+  `type: hermes_agent` instead of the generic `type: api`, so the Cognee server
+  can distinguish Hermes connections from other API clients.
+- **Package metadata declares Apache-2.0.** `pyproject.toml` now includes the
+  license identifier.
+- **The README links Hermes' installation guide** instead of inlining its
+  `curl … | bash` one-liner. The catalog's install scanner flags a piped shell
+  script even inside a README, and `hermes plugins validate` now reports
+  `security scan — safe` with no warnings.
+- **The README makes the existing Python 3.10+ requirement explicit**, including
+  guidance for macOS users whose Xcode Command Line Tools provide Python 3.9.
+  The minimum supported Python version has not changed.
+
+### Fixed
+- **Repo indexing submitted the repository under a field the server had stopped
+  reading, so every index 400'd ([#420](https://github.com/topoteretes/cognee-integrations/issues/420)).**
+  cognee 1.5.4 renamed the form field that carries the repository spec on
+  `POST /api/v1/remember` with `content_type=code` from `repositories` to
+  `raw_data`. `hermes cognee index-repo` still sent the old name, and an unrecognised multipart part is
+  dropped by the server rather than refused — so each request arrived naming no
+  repository at all and came back `HTTP 400: content_type='code' requires at least
+  one repository path or git URL in 'raw_data'`. Local paths and git URLs failed
+  alike. The spec now goes in `raw_data`.
+- **A 400 the server could explain was reported as "your server is too old".** The
+  error branch treated any 400 whose body mentioned `content_type` as a server
+  predating `content_type='code'`. Every 400 the server's code branch raises names
+  that field — including the one above — so the actionable message was overwritten
+  with advice to upgrade a deployment that was already new enough, and the reporter
+  of #420 spent the session chasing the wrong problem. Only the server's own
+  "Unsupported content_type" wording counts as a version problem now; every other
+  400 is passed through verbatim.
 
 ## [1.2.1]
 

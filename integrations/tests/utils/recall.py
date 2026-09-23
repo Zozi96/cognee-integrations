@@ -1,8 +1,9 @@
 """Driver for ``session-context-lookup.py``'s ``_run`` — the prompt hot path.
 
-``_run`` is where a prompt turns into memory: it fans out over four recall scopes,
-folds each call's outcome back into the shared connection state, feeds the circuit
-breaker, and emits the ``context_lookup_*`` event the status line reads. Testing
+``_run`` is where a prompt turns into memory: it runs the graph-scope recall (plus
+the code lane when armed), folds each call's outcome back into the shared
+connection state, feeds the circuit breaker, and emits the ``context_lookup_*``
+event the status line reads. Testing
 it needs every one of those seams captured at once, which is why this lives here
 rather than being re-stubbed per file.
 
@@ -22,12 +23,21 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-#: The scopes ``_run`` fans out over, in canonical (reporting) order. The
-#: scopes are dispatched concurrently, so this is the order of ``per_scope`` and
-#: of the injected sections, not an order of calls. The optional ``code`` lane
-#: is added only on prompts that arm it, so it is not part of the always-present
-#: set.
-SCOPES = ("session", "trace", "session_context", "graph")
+#: The scopes ``_run`` dispatches, in canonical (reporting) order. Since the
+#: only_context contract of cognee 1.6.0 (SDK-741) memory is ONE graph-scope
+#: recall: its item's ``text`` already carries the conversation history, the
+#: retrieved context and the session guidance block, so the former ``session``,
+#: ``trace`` and ``session_context`` requests are gone. The optional ``code``
+#: lane is added only on prompts that arm it, so it is not part of the
+#: always-present set.
+SCOPES = ("graph",)
+
+#: The canonical order once the code lane is armed: ``_run`` appends ``code``
+#: after the memory request, so this is what ``per_scope`` reads on a prompt
+#: that names a symbol inside an indexed repo. Tests that need two requests in
+#: flight together (concurrency, one-failure containment, once-per-fan-out
+#: accounting) arm the lane with ``arm_code_lane`` and assert against this.
+CODE_SCOPES = ("graph", "code")
 
 #: Base URL every driven run resolves to. Health state is keyed by service URL
 #: (SDK-356), so assertions need the exact value the hook was handed.
@@ -36,12 +46,9 @@ URL = "https://cloud.example"
 #: A session key in the shape the hooks accept, shared by the header tests.
 SESSION_KEY = "fde122ae-07db-431d-b5af-acba353e4e3e"
 
-#: One session hit and nothing else — the smallest recall that counts as a hit.
+#: One memory item and nothing else — the smallest recall that counts as a hit.
 HIT = {
-    "session": [{"question": "q1", "answer": "a1"}],
-    "trace": [],
-    "graph": [],
-    "session_context": [],
+    "graph": [{"source": "graph", "text": "The question is: `q1`\n\nContext:\n`fact`"}],
 }
 
 
@@ -66,6 +73,34 @@ def load_lookup(
     return module
 
 
+#: What the armed lane reports and queries, shared by every test that arms it.
+CODE_LANE = {
+    "identifier": "process_payment",
+    "dataset": "codebase-proj",
+    "code_query": {"operation": "query_facts", "name": "process_payment", "limit": 5},
+}
+
+
+def arm_code_lane(monkeypatch, lane: dict | None = None) -> dict:
+    """Make the next ``_run`` dispatch the code lane, whatever the prompt.
+
+    ``_run`` imports ``_code_graph.auto_code_lane`` lazily, so a fake module in
+    ``sys.modules`` is the gate it sees. The real gate (identifier-shaped token
+    plus an indexed repo on disk) is exercised in test_recall_code_lane.py;
+    everywhere else the lane is only wanted as a SECOND request in flight
+    alongside the memory request, and this is the cheapest way to get one.
+    Call it AFTER ``hook_module`` has loaded the hook: ``_code_graph`` is one
+    of the isolated sibling modules, popped from ``sys.modules`` on every load,
+    so a stub installed beforehand is gone by the time ``_run`` imports it.
+    Returns the lane dict the stubbed gate hands back.
+    """
+    lane = dict(lane or CODE_LANE)
+    fake = types.ModuleType("_code_graph")
+    fake.auto_code_lane = lambda prompt, cwd: dict(lane)
+    monkeypatch.setitem(sys.modules, "_code_graph", fake)
+    return lane
+
+
 #: A connection-state marker standing for "this server has answered before",
 #: which is what separates a real outage from an ordinary cold start.
 READY_PRIOR = {"state": "ready", "base_url": URL, "checked_at": 1.0}
@@ -82,9 +117,10 @@ class RecallRun:
     writes: list[tuple[str, str, str]] = field(default_factory=list)
     #: ``("success", url)`` / ``("failure", url, reason)`` breaker accounting.
     breaker: list[tuple] = field(default_factory=list)
-    #: Scope names actually dispatched. The scopes run concurrently (each call
-    #: lands here from its own worker thread), so the ORDER of this list is not
-    #: meaningful — assert on membership and length.
+    #: Scope names actually dispatched. A plain prompt makes exactly one call,
+    #: so ``["graph"]`` is a safe equality; with the code lane armed the two
+    #: calls run concurrently (each lands here from its own worker thread), so
+    #: their ORDER is not meaningful — assert on membership and length.
     calls: list[str] = field(default_factory=list)
     #: ``{scope: timeout}`` as handed to ``recall_via_http``, for budget clamping.
     timeouts: dict[str, float] = field(default_factory=dict)
@@ -194,6 +230,17 @@ def drive_recall(
     }
     for name, impl in seams.items():
         monkeypatch.setattr(module, name, impl)
+    # The cross-dataset hint's listing (claude-code / codex): stubbed to "no
+    # other datasets" so no hook test reaches the readable-datasets cache or
+    # the network. Left alone when the test already replaced it (the hook
+    # binds the common module's function by name, so an untouched seam is
+    # still that very object) — test_cross_dataset_search.py stubs its own.
+    common = sys.modules.get("_plugin_common")
+    original = getattr(common, "cached_readable_datasets", None)
+    if hasattr(module, "cached_readable_datasets") and (
+        original is None or module.cached_readable_datasets is original
+    ):
+        monkeypatch.setattr(module, "cached_readable_datasets", lambda **kw: [])
 
     if local_sdk:
         _install_local_sdk(module, monkeypatch, run, sdk_recall)
@@ -277,14 +324,19 @@ def _install_local_sdk(module, monkeypatch, run: RecallRun, sdk_recall) -> None:
         monkeypatch.setitem(sys.modules, name, mod)
 
 
-def assert_valid_per_scope(per_scope: dict) -> None:
-    """Every scope reports, in canonical order, with a numeric non-negative time.
+def assert_valid_per_scope(per_scope: dict, scopes: tuple = SCOPES) -> None:
+    """Every dispatched scope reports, in canonical order, with a numeric
+    non-negative time.
 
-    A scope missing from the breakdown is the failure this guards: the point of
-    per-scope instrumentation is that a scope which returned nothing or never ran
-    is still visible, rather than vanishing from the record.
+    ``scopes`` is what the run was expected to dispatch: ``SCOPES`` on a plain
+    prompt, ``CODE_SCOPES`` once the lane is armed. A scope missing from the
+    breakdown is the failure this guards: the point of per-scope
+    instrumentation is that a scope which returned nothing or never ran is
+    still visible, rather than vanishing from the record.
     """
-    assert list(per_scope.keys()) == list(SCOPES), f"expected all four scopes in order: {per_scope}"
+    assert list(per_scope.keys()) == list(scopes), (
+        f"expected exactly the scopes in order: {per_scope}"
+    )
     for label, record in per_scope.items():
         assert isinstance(record["hits"], int), f"{label} hits not an int: {record}"
         assert isinstance(record["elapsed_ms"], (int, float)), f"{label} elapsed: {record}"

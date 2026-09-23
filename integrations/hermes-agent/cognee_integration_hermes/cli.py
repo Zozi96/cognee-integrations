@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 
-from . import code_graph, update_check
+from . import catalog, code_graph, update_check
 from .config import DEFAULT_LOCAL_PORT, config_path, load_config, resolve_local_roots
 
 
@@ -46,6 +46,9 @@ def _pip_package_version() -> str:
 
 def _update_hint(cfg, *, force: bool = False) -> str:
     """A one-line nudge when PyPI has a newer release, else "". Never raises."""
+    name = catalog.catalog_name()
+    if name:
+        return f"managed by the Hermes catalog — run `hermes plugins update {name}`"
     if not cfg.get("update_check", True):
         return ""
     pip_version = _pip_package_version()
@@ -79,7 +82,12 @@ def _print_status(args) -> None:
     print(f"  LLM key:         {'set' if cfg.get('llm_api_key') else 'missing'}")
     print(f"  API key:         {'set' if cfg.get('api_key') else 'missing'}")
     print(f"  Improve on end:  {cfg.get('improve_on_end')}")
-    if pip_version and plugin_version and pip_version != plugin_version:
+    if (
+        not catalog.catalog_name()
+        and pip_version
+        and plugin_version
+        and pip_version != plugin_version
+    ):
         # Hermes runs the copy under HERMES_HOME/plugins, so `pip install -U`
         # alone changes nothing until the installer refreshes that copy.
         print(
@@ -97,8 +105,13 @@ def _print_version(args) -> None:
     cfg = load_config()
     plugin_version = _installed_plugin_version()
     pip_version = _pip_package_version()
-    print(f"cognee-integration-hermes-agent {pip_version or plugin_version or '(unknown)'}")
-    if plugin_version and pip_version and plugin_version != pip_version:
+    print(f"cognee-integration-hermes-agent {plugin_version or pip_version or '(unknown)'}")
+    if (
+        not catalog.catalog_name()
+        and plugin_version
+        and pip_version
+        and plugin_version != pip_version
+    ):
         print(
             f"  installed plugin copy is {plugin_version} — run `cognee-hermes-install` "
             "to refresh it from the pip package"
@@ -138,7 +151,7 @@ def _connect_backend():
 
 
 def _run_index_repo(args) -> int:
-    """Index one repository into a deterministic code graph (cognee >= 1.5.3)."""
+    """Index one repository into a deterministic code graph (cognee >= 1.5.4)."""
     spec = code_graph.canonical_spec(str(args.repo))
     if not code_graph.is_remote_repo(spec) and not Path(spec).is_dir():
         print(f"Error: {args.repo!r} is not a directory or a recognized git URL.")
@@ -221,11 +234,22 @@ def _run_setup(args) -> None:
 
 def _print_install(args) -> None:
     here = Path(__file__).resolve().parents[1]
-    print("\nInstall via pip (recommended):")
+    name = catalog.catalog_name()
+    if name:
+        print(f"\nManaged by the Hermes catalog. Update with: hermes plugins update {name}")
+        print("Run `hermes memory setup` to configure Cognee.\n")
+        return
+    print("\nInstall via the Hermes catalog (available after catalog acceptance):")
+    print("  hermes plugins install cognee")
+    print("  hermes plugins enable cognee")
+    print("  hermes memory setup")
+    print("  # Updates: hermes plugins update cognee")
+    print("\nInstall via pip:")
     print("  pip install cognee-integration-hermes-agent")
     print("  cognee-hermes-install     # copies the plugin into $HERMES_HOME/plugins")
     print("  hermes memory setup")
-    print("\nInstall as a local Hermes directory plugin (from a checkout):")
+    print("  # Updates: pip install -U cognee-integration-hermes-agent, then cognee-hermes-install")
+    print("\nInstall from a checkout into a Hermes home without an existing Cognee plugin:")
     print("  mkdir -p ~/.hermes/plugins/cognee")
     print(f"  cp -R {here}/. ~/.hermes/plugins/cognee/")
     print("  hermes memory setup\n")
@@ -252,18 +276,22 @@ def register_cli(subparser) -> None:
     subs = subparser.add_subparsers(dest="cognee_command")
     status = subs.add_parser("status", help="Show Cognee memory status")
     status.add_argument(
-        "--check-updates", action="store_true", help="Force a live PyPI update check"
+        "--check-updates",
+        action="store_true",
+        help="Check PyPI for pip installs; show Hermes update guidance for catalog installs",
     )
     subs.add_parser("setup", help="Run Hermes memory setup for Cognee")
     subs.add_parser("config", help="Print Cognee plugin config with secrets redacted")
     subs.add_parser("install", help="Print installation commands")
     version = subs.add_parser("version", help="Show plugin version and update availability")
     version.add_argument(
-        "--check-updates", action="store_true", help="Force a live PyPI update check"
+        "--check-updates",
+        action="store_true",
+        help="Check PyPI for pip installs; show Hermes update guidance for catalog installs",
     )
     index = subs.add_parser(
         "index-repo",
-        help="Index a repository into a deterministic Cognee code graph (cognee >= 1.5.3)",
+        help="Index a repository into a deterministic Cognee code graph (cognee >= 1.5.4)",
     )
     index.add_argument("repo", help="Local path or git URL of the repository")
     index.add_argument(

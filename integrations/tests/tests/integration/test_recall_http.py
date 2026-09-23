@@ -81,6 +81,18 @@ def test_http_500_is_error_envelope(rh, mock_server):
     assert out != rh.UNREACHABLE
 
 
+def test_http_404_is_an_authoritative_empty(rh, mock_server):
+    """cognee >= 1.6.0 answers a dataset with no graph yet, or an unresolvable
+    dataset name, with 404 instead of an empty list. Nothing is there to find:
+    an empty result, not an error envelope, and not a local-CLI fallback."""
+    mock_server.force_response(
+        "POST", RECALL, 404, {"detail": {"message": "No datasets found. [DatasetNotFoundError]"}}
+    )
+    out = _recall(rh, mock_server.url)
+    assert out == []
+    assert out != rh.UNREACHABLE
+
+
 @pytest.mark.parametrize("code", [401, 403])
 def test_auth_failure_is_error_envelope_not_fallback(rh, mock_server, code):
     mock_server.force_response("POST", RECALL, code, {"detail": "denied"})

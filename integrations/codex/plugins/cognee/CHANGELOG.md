@@ -10,6 +10,170 @@ is the cache key and semver record, bumped on each release, not the update trigg
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0]
+
+### Changed
+- **Bundled cognee is 1.6.0** (was 1.5.4; `_PINNED_COGNEE_VERSION`). The shared
+  `~/.cognee-plugin/venv` is upgraded on the next local-mode session start, which
+  runs that release's migrations. 1.6.0 made `fastembed` and `onnxruntime` core
+  dependencies (the `fastembed` and `codegraph` extras are now empty shims), so the
+  venv grows and a cold install takes longer. Search and recall now answer an
+  unresolvable dataset name, or a dataset without a graph yet, with `404` instead
+  of an empty list; the explicit search path (`cognee-search.sh`) treats that as an
+  empty result rather than an error, as the prompt hook already did.
+- **One recall request per prompt, and the memory block is what the LLM would have
+  been given (SDK-741, cognee #5085).** With `only_context=true`, a completion search
+  type on cognee 1.6.0 returns one item per dataset whose `text` is the full LLM
+  input: the conversation history for the session, the question with the retrieved
+  graph context rendered through the retriever's template, and the session guidance
+  block (a separate `system_prompt` field carries the task template and is ignored).
+  `session-context-lookup.py` therefore no longer fans out over the `session`, `trace`, `session_context` and `graph` scopes: The single request is
+  `scope=["graph"]`, `HYBRID_COMPLETION`, `only_context=true`, with the session id —
+  kept explicit because the server's `auto` scope would add raw session entries next
+  to the prompt (or short-circuit the graph on a session hit) and an unpinned type
+  lets the router pick `CHUNKS`, which builds no prompt. The item's `text` is injected
+  whole under `=== Cognee memory ===` (label `[cognee-memory]`, formerly
+  `[graph-snapshot]`); the 1500-character cap is gone, since the context sits in the
+  middle of that string and the guidance at its end, so a cut removed exactly what
+  memory is for — `top_k` bounds the size server-side. The header keeps its hit-count wording; `last_recall.json` keeps all five `hits` keys, the retired ones at zero, and `per_scope` lists only the scopes dispatched. The optional
+  code-graph lane is unchanged and still runs only on identifier-shaped prompts.
+  Against a pre-1.6.0 server the item holds the bare retrieval context and is
+  rendered the same way; the session layers are then not injected.
+
+- **Automatic improves run at most every 30 minutes** per session (was 10):
+  `COGNEE_IMPROVE_COOLDOWN` now defaults to `1800`. The idle and auto triggers honour
+  it, and a failed attempt arms the same window as a backoff; the session-end sync,
+  the sync skill and a dataset switch still improve regardless.
+- **Search is graph and code only.** `cognee-search.sh` no longer has a `--session`
+  mode and no longer defaults to session-then-graph; every search is a graph-scope
+  recall (or `--code`). The session cache is written and bridged, never searched:
+  on cognee 1.6.0 the graph item's prompt already carries this session's history.
+- **The "from past sessions" count is gone** from the memory header, the status
+  line and `last_recall.json` (`cross_session_hits`). It guessed provenance by
+  looking for the session id inside each graph passage; the 1.6.0 memory item is one
+  rendered prompt that mixes history, retrieved context and guidance, so no substring
+  can say where a fact came from, and memory is graph-only recall now anyway.
+
+### Fixed
+- **Fresh installs against cognee 1.6.0 could not mint their owner API key
+  (SDK-740).** cognee 1.6.0 stopped baking `default_password` into the default user:
+  the server creates that user at startup only when `DEFAULT_USER_PASSWORD` is set,
+  sets the password once, and never rewrites a stored one. The owner-key bootstrap
+  logs in as `default_user@example.com` / `default_password`, so on a fresh venv the
+  login answered `400 "This user does not have a password"` and the plugin never got
+  a key. The server this plugin boots is now started with
+  `DEFAULT_USER_EMAIL=default_user@example.com` and
+  `DEFAULT_USER_PASSWORD=default_password` (the literals every Cognee plugin shares,
+  since they all share one server and one database), `setdefault` so an operator's
+  own `DEFAULT_USER_*` export wins. Existing installs are untouched: their user row
+  already holds that password. `COGNEE_USER_EMAIL`/`COGNEE_USER_PASSWORD` still pick
+  the user the plugin logs in as, and a non-default user must already exist. Against
+  a server the plugin did not start, the two 400 answers now produce an actionable
+  message (start the server with `DEFAULT_USER_PASSWORD` matching
+  `COGNEE_USER_PASSWORD`, or set `COGNEE_API_KEY`) instead of the generic "set the
+  credentials correctly". README gains a paragraph on where the default user's
+  password comes from and what to set for an externally managed server.
+
+## [1.6.7]
+
+### Fixed
+- **The cross-dataset search hint broke on an install path containing a space.** The
+  "Other Cognee datasets you can search" line the prompt hook appends spells out
+  `cognee-search.sh "<query>" 10 --graph --dataset-id <id>` with the script's resolved
+  absolute path, and that path was interpolated bare — so on such an install the model
+  was handed a command that word-split before it could run. Quoted. Codex's own hook
+  manifest already quoted `${PLUGIN_ROOT}`, so only this one command was affected;
+  the Claude Code plugin hit the same defect across its whole manifest
+  ([#5154](https://github.com/topoteretes/cognee/issues/5154)).
+
+## [1.6.6]
+
+### Added
+- **The status bar says when credits are not enough, and where to top up.** Until now a
+  cloud tenant that ran out of credits saw nothing: every recall, save and improve came
+  back `HTTP 402 Payment Required`, the plugin logged it as a generic `recall_error` and
+  moved on, and the credits segment kept showing the last balance it had read — or
+  nothing at all on a tenant whose billing overview could not be fetched. Now a 402 from
+  any billable route (recall, trace/answer save, `/remember`, improve) is recorded on the
+  tenant's credits marker as `payment_required: {op, at}`, and the segment renders it:
+  - balance above a dollar but refused: `credits: $2.04 (not enough for recall)`;
+  - a dollar or less left: `credits: $0.61 · top up: https://platform.cognee.ai/billing` —
+    the cloud refuses requests before the balance reaches zero, so the threshold is a
+    dollar, not zero;
+  - refused with no balance reading at all (the platform fetch itself failed): `credits: not enough for recall`, with the top-up link.
+
+  The top-up link is the production billing page; staging and dev sessions set
+  `COGNEE_BILLING_URL` (the web frontend's host is not derivable from the tenant host).
+  The platform API host the balance is fetched from IS derived from the service URL:
+  beside a `tenant-<id>.<env>.cognee.ai` data plane it is `api.<env>.cognee.ai`, so a dev
+  tenant asks the dev platform instead of production (which answered `401` and left the
+  segment blank). A non-tenant URL falls back to the production platform;
+  `COGNEE_PLATFORM_API_URL` overrides.
+
+  The next billable operation that succeeds clears the note, so a top-up shows through
+  on the following prompt. The note is written under the same per-tenant lock as the
+  balance and survives the balance refresh: a small positive balance can still be "not
+  enough", and only a successful operation knows otherwise. New events:
+  `credits_payment_required`, `credits_payment_cleared`, `credits_marker_write_failed`.
+- **Search another dataset without switching.** Recall reads only the active dataset,
+  so information living in another dataset was invisible unless the user switched —
+  a full switch (sync, new Cognee session, repointed launch record) just to look
+  something up. Now, on every prompt the server answers, the recall hook appends an
+  `Other Cognee datasets you can search` block to the injected context: every other
+  dataset the identity can read (read-only ones included), with UUIDs, plus the
+  command to search one. It rides along on hits too: graph retrieval is
+  nearest-neighbour and returns something from any populated dataset, so "zero
+  hits" never happens and only the model can tell whether the recalled context
+  answers the user. If the user is recalling something the active dataset did not
+  have, Codex offers those datasets as a numbered list; the chosen one gets a one-off
+  **graph-only** search and the answer names its source dataset. The active dataset,
+  session and write target are untouched. The same flow is spelled out in the
+  `memory` skill for when an explicit search comes back empty.
+  - `scripts/list-datasets.py [--others]` lists every readable dataset (JSON) with
+    the active one marked (`switch-dataset.py --list` still shows only switch
+    targets). `list_readable_datasets` is the shared listing both build on.
+  - `cognee-search.sh --dataset-id <uuid>` addresses a dataset by UUID (a name only
+    resolves among owned datasets). Any dataset other than the active one is forced
+    to graph scope with the session id dropped — session history is bound to the
+    active dataset — with a note on stderr; the active dataset named by hand keeps
+    the full scope.
+  - The hint's listing comes from a per-plugin cache
+    (`~/.cognee-plugin/codex/readable-datasets.json`, keyed by server and identity)
+    refreshed at most every `COGNEE_DATASETS_CACHE_TTL` seconds (default 300) and
+    only inside what remains of the recall budget, so the prompt path never waits on
+    it. `COGNEE_RECALL_DATASET_HINT=off` disables the hint. Every other readable
+    dataset is named — nothing ranks them, so the user chooses.
+  - New hook events: `recall.dataset_hint`, `datasets.readable_refresh_failed`,
+    `datasets.list_failed`.
+
+### Removed
+- **The `· switched` status-line tag.** After `/cognee-switch-datasets` the bar appended
+  a faint `· switched` after the mode. The dataset name beside it already says which
+  dataset the session is on, so the tag added nothing, cluttered the line, and read
+  as a state that wanted acting on. Gone; the launch record still carries
+  `switched_at` for the hooks.
+
+### Fixed
+- **Repo indexing submitted the repository under a field the server had stopped
+  reading, so every index 400'd ([#420](https://github.com/topoteretes/cognee-integrations/issues/420)).**
+  cognee 1.5.4 renamed the form field that carries the repository spec on
+  `POST /api/v1/remember` with `content_type=code` from `repositories` to
+  `raw_data`. The plugin still sent the old name, and an unrecognised multipart part is
+  dropped by the server rather than refused — so each request arrived naming no
+  repository at all and came back `HTTP 400: content_type='code' requires at least
+  one repository path or git URL in 'raw_data'`. Local paths and git URLs failed
+  alike. The spec now goes in `raw_data`. The bundled server has been pinned to 1.5.4
+  since the previous release, so a fresh install hit this on its first
+  `/cognee-code`.
+- **A 400 the server could explain was reported as "your server is too old".** The
+  error branch treated any 400 whose body mentioned `content_type` as a server
+  predating `content_type='code'`. Every 400 the server's code branch raises names
+  that field — including the one above — so the actionable message was overwritten
+  with advice to upgrade a deployment that was already new enough, and the reporter
+  of #420 spent the session chasing the wrong problem. Only the server's own
+  "Unsupported content_type" wording counts as a version problem now; every other
+  400 is passed through verbatim.
+
 ## [1.6.5]
 
 ### Fixed

@@ -161,7 +161,7 @@ def test_precompact_produces_an_anchor_carrying_the_session(
 def test_search_cli_finds_the_session_from_the_command_line(captured_session, nonce):
     """cognee-search.sh is the documented way to ask memory directly."""
     run = captured_session.run_shell(
-        "cognee-search.sh", f"What runs on cluster edge-7 for {nonce}?", "5", "--session"
+        "cognee-search.sh", f"What runs on cluster edge-7 for {nonce}?", "5", "--graph"
     )
     assert run.ok, f"cognee-search.sh failed (rc={run.returncode}): {run.stderr[:600]}"
 
@@ -174,7 +174,7 @@ def test_search_cli_finds_the_session_from_the_command_line(captured_session, no
 
 def test_search_cli_emits_parseable_output(captured_session, nonce):
     """Whatever it prints must be usable by a caller, not just human-readable."""
-    run = captured_session.run_shell("cognee-search.sh", f"{nonce}", "3", "--session")
+    run = captured_session.run_shell("cognee-search.sh", f"{nonce}", "3", "--graph")
     assert run.ok, f"cognee-search.sh failed (rc={run.returncode}): {run.stderr[:600]}"
 
     text = run.stdout.strip()

@@ -362,7 +362,7 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(schemas["cognee_code_search"]["parameters"]["required"], ["operation"])
         self.assertEqual(
             set(schemas["cognee_recall"]["parameters"]["properties"]),
-            {"query", "scope", "search_type", "top_k"},
+            {"query", "search_type", "top_k"},
         )
 
     def test_optional_tools_can_be_disabled_by_config(self):
@@ -451,37 +451,25 @@ class TestRecallPayload(unittest.TestCase):
         self.assertEqual(kwargs["top_k"], 7)
         self.assertIs(kwargs["auto_route"], False)
 
-    def test_auto_scope_targets_both_session_and_datasets(self):
+    def test_recall_targets_the_graph_with_the_dataset_and_the_session(self):
         kwargs = self._recall_kwargs({"query": "q"}, session_cognee_id="hermes_abc")
+        self.assertEqual(kwargs["scope"], ["graph"])
+        self.assertEqual(kwargs["datasets"], ["hermes"])
         self.assertEqual(kwargs["session_id"], "hermes_abc")
-        self.assertEqual(kwargs["datasets"], ["hermes"])
 
-    def test_missing_scope_defaults_to_auto(self):
-        kwargs = self._recall_kwargs({"query": "q", "scope": None})
-        self.assertIsNotNone(kwargs["session_id"])
-        self.assertIsNotNone(kwargs["datasets"])
+    def test_a_legacy_scope_argument_is_ignored(self):
+        # The tool no longer takes ``scope``; an older caller passing one gets
+        # the same graph request as everyone else.
+        for legacy in (None, "auto", "session", "graph", "GRAPH"):
+            with self.subTest(scope=legacy):
+                kwargs = self._recall_kwargs({"query": "q", "scope": legacy})
+                self.assertEqual(kwargs["scope"], ["graph"])
+                self.assertEqual(kwargs["datasets"], ["hermes"])
+                self.assertIsNotNone(kwargs["session_id"])
 
-    def test_session_scope_targets_the_session_only(self):
-        kwargs = self._recall_kwargs({"query": "q", "scope": "session"})
-        self.assertIsNotNone(kwargs["session_id"])
-        self.assertIsNone(kwargs["datasets"])
-
-    def test_graph_scope_targets_datasets_only(self):
-        kwargs = self._recall_kwargs({"query": "q", "scope": "graph"})
-        self.assertEqual(kwargs["datasets"], ["hermes"])
-        self.assertIsNone(kwargs["session_id"])
-
-    def test_scope_is_case_insensitive(self):
-        kwargs = self._recall_kwargs({"query": "q", "scope": "GRAPH"})
-        self.assertIsNone(kwargs["session_id"])
-
-    def test_search_type_applied_outside_session_scope(self):
-        kwargs = self._recall_kwargs({"query": "q", "scope": "graph", "search_type": "CHUNKS"})
+    def test_search_type_is_applied(self):
+        kwargs = self._recall_kwargs({"query": "q", "search_type": "CHUNKS"})
         self.assertEqual(kwargs["query_type"], "CHUNKS")
-
-    def test_search_type_ignored_in_session_scope(self):
-        kwargs = self._recall_kwargs({"query": "q", "scope": "session", "search_type": "CHUNKS"})
-        self.assertIsNone(kwargs["query_type"])
 
     def test_unrecognized_search_type_is_passed_through(self):
         # The provider does not police search-type names; each transport resolves

@@ -57,6 +57,8 @@ EOF
 chmod 600 ~/.cognee/.env
 ```
 
+**Default user and its password.** The local server is started with `DEFAULT_USER_EMAIL=default_user@example.com` and `DEFAULT_USER_PASSWORD=default_password`, which is how cognee 1.6.0 and later create the default user at all (a server started without `DEFAULT_USER_PASSWORD` creates no default account, and the password is set once and never rewritten). The plugin logs in as that user to mint its owner API key, so a fresh install needs no manual step and an existing install keeps working. Exporting `DEFAULT_USER_EMAIL`/`DEFAULT_USER_PASSWORD` yourself overrides what the plugin passes; `COGNEE_USER_EMAIL`/`COGNEE_USER_PASSWORD` pick the user the plugin logs in as, and a non-default user must already exist on the server. When pointing at a server you run yourself (`COGNEE_BASE_URL`), either start it with `DEFAULT_USER_PASSWORD` set to the same value as `COGNEE_USER_PASSWORD`, or set `COGNEE_API_KEY` so no login is needed; a server without either answers the login with an error that says so.
+
 **Windows (PowerShell)** — same idea, same file:
 
 ```powershell
@@ -229,7 +231,8 @@ Set a custom dataset at launch:
 export COGNEE_PLUGIN_DATASET="my-project-memory"
 ```
 
-`COGNEE_PLUGIN_DATASET` seeds the dataset at launch. Recall searches only the active dataset.
+`COGNEE_PLUGIN_DATASET` seeds the dataset at launch. Recall searches only the active dataset (but see
+[Searching another dataset without switching](#searching-another-dataset-without-switching)).
 Data added outside of Claude to the dataset (via SDK or the server for example) is visible in Claude via the Cognee plugin.
 
 ### Switching datasets mid-session
@@ -246,7 +249,7 @@ A Cognee session never spans two datasets, so the switch:
    then releases the old handle (register-then-unregister, so a local agent-mode server never
    sees zero connections);
 3. repoints this launch's record so every hook, the shell wrappers, the idle/exit watchers and
-   the status line follow it, and appends `· switched` to the status line.
+   the status line follow it.
 
 The choice lives in the launch record (`~/.cognee-plugin/claude-code/sessions/<host id>.json`),
 so it survives `--resume` and beats the shell's `COGNEE_PLUGIN_DATASET` (and a pinned
@@ -254,6 +257,41 @@ so it survives `--resume` and beats the shell's `COGNEE_PLUGIN_DATASET` (and a p
 list and the session-end sync covers them again as a safety net. The script behind the skill is
 `scripts/switch-dataset.py` (`--list [--json]`, `<name> [--force] [--json]`,
 `--session-key <host id>` when several launches share a directory).
+
+### Searching another dataset without switching
+
+Recall only ever reads the active dataset. On every prompt the server answers, the hook also
+appends a block to the injected context naming **every other dataset you can read** (with their
+UUIDs — nothing ranks them, so you choose; read-only ones included, since a search needs no write
+access) and the command to search one of them. Whether the recalled context actually answers you
+is a call only the model can make — graph retrieval returns its nearest matches from any populated
+dataset, relevant or not — so the block is worded for it to act on only when memory did not answer.
+If you are asking Claude to recall something and the active dataset did not have it, it offers those datasets as a picker; pick one and Claude runs a **one-off, graph-only search** on
+it and tells you which dataset the answer came from. Nothing else moves: the active dataset,
+the Cognee session and where writes go stay as they were — this is for looking something up
+elsewhere, not for working there (that is what the switch above is for).
+
+The same flow is available on demand through the `cognee-search` skill when an explicit search comes
+back empty. Under the hood:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/list-datasets.py" --others   # the candidates
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "<query>" 10 --graph --dataset-id <uuid>
+```
+
+Every search reads the knowledge graph (or, with `--code`, a repository's code graph); the
+session cache is written, never searched. The session id is bound to the active dataset, so the
+wrapper drops it for any other dataset; the active dataset named by hand keeps it. Datasets are
+addressed by UUID because a name only resolves among the
+datasets your identity owns. The listing behind the hint is cached per plugin
+(`~/.cognee-plugin/claude-code/readable-datasets.json`) and refreshed at most every
+`COGNEE_DATASETS_CACHE_TTL` seconds (default `300`), inside what is left of the recall budget,
+so the prompt path never waits on it.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `COGNEE_RECALL_DATASET_HINT` | `on` | Set `off` to stop the per-prompt hook from naming the other datasets. The explicit skill flow is unaffected. |
+| `COGNEE_DATASETS_CACHE_TTL` | `300` | Seconds the cached readable-datasets listing is served before one bounded refresh. |
 
 ## Hooks
 
@@ -304,7 +342,7 @@ A **failed** attempt arms the same window as a **backoff**: if the submit timed 
 |---|---|---|
 | `COGNEE_IDLE_POLL` | `10` | Poll interval in seconds |
 | `COGNEE_IDLE_THRESHOLD` | `60` | Seconds of inactivity before idle improve fires |
-| `COGNEE_IMPROVE_COOLDOWN` | `600` | Minimum seconds between automatic (idle/auto) improves of one session; persisted per session |
+| `COGNEE_IMPROVE_COOLDOWN` | `1800` | Minimum seconds between automatic (idle/auto) improves of one session; persisted per session |
 | `COGNEE_AUTO_IMPROVE_EVERY` | `150` | Stored tool calls/stops between automatic improves (`0` disables) |
 | `COGNEE_IMPROVE_SUBMIT_TIMEOUT` | `420` | Read timeout for the improve POST (agent-context extraction and distillation run inside the request) |
 
@@ -350,7 +388,7 @@ changed the working tree. Index one explicitly — a different repo, a git URL, 
 automation declined — with:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/cognee-index-repo.sh <repo-path-or-git-url> [--dataset <name>] [--index-vectors] [--wait <seconds>]
+"${CLAUDE_PLUGIN_ROOT}/scripts/cognee-index-repo.sh" <repo-path-or-git-url> [--dataset <name>] [--index-vectors] [--wait <seconds>]
 ```
 
 Query it with `cognee-search.sh ... --code` (see the `cognee-code` skill for the
@@ -463,10 +501,10 @@ Both cases show the same reason — the fix is the same either way, and `llm-sta
 **Memory hits.** The line ends with what memory actually did — this turn, then (faint) over the session:
 
 ```
-● cognee: agent_sessions · local · 5 memory hits (3 from past sessions) · 12/40 turns had hits this session
+● cognee: agent_sessions · local · 5 memory hits · 12/40 turns had hits this session
 ```
 
-`5 memory hits` is how many memories this turn's lookup found and injected into context (across session turns, traces, graph context and agent guidance). `3 from past sessions` is the part of that Claude could not have known from this conversation: knowledge-graph passages that came from an earlier session (or from a `remember`-ed document) rather than from this session's own cache — omitted when zero. `12/40 turns had hits this session` is the running total — 40 prompts so far, memory fired on 12 of them. A session that has not had a single hit yet shows `memory warming up (7 turns)` instead of a bare `0/7`: the graph is usually still filling up. `UserPromptSubmit` writes these to `~/.cognee-plugin/claude-code/recall/<session>.json`, so the renderer stays network-free, and the counts are stamped with the session that produced them so a second terminal's numbers never show up here. The per-scope breakdown (`recall 4s/5t/0g/1a · saved 2p/41t/2a` — `s`ession turns, `t`races, `g`raph context, `a`gent guidance; saves as `p`rompts, `t`races, `a`nswers) is still available with `COGNEE_STATUSLINE_COUNTS=full`; hide the segment with `false`.
+`5 memory hits` is how many memory blocks this turn's lookup found and injected into context (the memory request, plus code-graph facts when that lane is armed). `12/40 turns had hits this session` is the running total — 40 prompts so far, memory fired on 12 of them. A session that has not had a single hit yet shows `memory warming up (7 turns)` instead of a bare `0/7`: the graph is usually still filling up. `UserPromptSubmit` writes these to `~/.cognee-plugin/claude-code/recall/<session>.json`, so the renderer stays network-free, and the counts are stamped with the session that produced them so a second terminal's numbers never show up here. The per-scope breakdown (`recall 4s/5t/0g/1a · saved 2p/41t/2a` — `s`ession turns, `t`races, `g`raph context, `a`gent guidance; saves as `p`rompts, `t`races, `a`nswers) is still available with `COGNEE_STATUSLINE_COUNTS=full`; hide the segment with `false`.
 
 | Env var | Default | Effect |
 |---|---|---|
@@ -732,7 +770,7 @@ Keys are letters, digits, and underscores. Values are taken literally — no `$V
 | demo auto-clear | `COGNEE_CLAUDE_CLEAR_AFTER_MESSAGE` | disabled | Clear transcript on Stop after capture |
 | idle watcher poll | `COGNEE_IDLE_POLL` | `10` | Idle watcher poll interval in seconds |
 | idle watcher threshold | `COGNEE_IDLE_THRESHOLD` | `60` | Seconds of inactivity before idle improve fires |
-| improve cooldown | `COGNEE_IMPROVE_COOLDOWN` | `600` | Minimum seconds between automatic (idle/auto) improves of one session |
+| improve cooldown | `COGNEE_IMPROVE_COOLDOWN` | `1800` | Minimum seconds between automatic (idle/auto) improves of one session |
 | auto-improve threshold | `COGNEE_AUTO_IMPROVE_EVERY` | `150` | Stored tool calls/stops between automatic improves (`0` disables) |
 | improve submit timeout | `COGNEE_IMPROVE_SUBMIT_TIMEOUT` | `420` | Read timeout for the improve POST |
 

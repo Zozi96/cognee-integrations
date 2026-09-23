@@ -1,9 +1,8 @@
 """Materialize the Hermes directory plugin from the installed pip package.
 
-Hermes discovers memory providers by scanning ``$HERMES_HOME/plugins/`` — a pip
-install alone puts this package in site-packages, where Hermes never looks. The
-``cognee-hermes-install`` console script bridges that gap: it lays down the
-exact directory shape the scanner expects, copied from the installed wheel.
+Hermes discovers memory providers through pip entry points and by scanning
+``$HERMES_HOME/plugins/``. The ``cognee-hermes-install`` console script adds
+the directory layout needed for the CLI and dashboard, copied from the wheel.
 The full flow:
 
     pip install cognee-integration-hermes-agent
@@ -35,6 +34,7 @@ import argparse
 import shutil
 from pathlib import Path
 
+from .catalog import catalog_name
 from .config import resolve_hermes_home
 
 # Packaged name -> name at the plugin root. plugin_init.py becomes the
@@ -63,6 +63,12 @@ def install(hermes_home: str | Path | None = None) -> Path:
         )
 
     target = home / "plugins" / "cognee"
+    name = catalog_name(target)
+    if name:
+        raise RuntimeError(
+            f"Refusing to overwrite catalog-managed plugin at {target}. "
+            f"Run `hermes plugins update {name}` instead."
+        )
     target.mkdir(parents=True, exist_ok=True)
     for source_name, target_name in _ROOT_FILES.items():
         shutil.copyfile(root_src / source_name, target / target_name)
@@ -90,7 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         help="HERMES_HOME to install into (default: auto-detect, else ~/.hermes)",
     )
     args = parser.parse_args(argv)
-    target = install(args.home)
+    try:
+        target = install(args.home)
+    except RuntimeError as exc:
+        parser.exit(1, f"{exc}\n")
     print(f"Cognee memory plugin installed at {target}")
     print("Next: run `hermes memory setup` and select `cognee`.")
     print("After a `pip install -U`, re-run `cognee-hermes-install` to update this copy.")

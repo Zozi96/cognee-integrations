@@ -1,13 +1,15 @@
 """A server that accepts and never answers must not hold the prompt.
 
-The concurrent fan-out pushes every scope's blocking request onto a worker
-thread and awaits them together; ``asyncio.run`` then waits for those workers
-at shutdown. The one new way this could stall a prompt is a worker that does
-not come back at the deadline — so this drives the real hook, as a subprocess,
-against a socket that accepts the connection and then says nothing, and pins:
+The fan-out pushes every scope's blocking request onto a worker thread and
+awaits them together; ``asyncio.run`` then waits for those workers at shutdown.
+Since the one-request memory contract of cognee 1.6.0 (SDK-741) a plain prompt
+makes exactly one such request, the graph scope. The one way this could stall a
+prompt is a worker that does not come back at the deadline — so this drives the
+real hook, as a subprocess, against a socket that accepts the connection and
+then says nothing, and pins:
 
   * the hook exits 0 (memory degrades, the agent never notices);
-  * every scope was dispatched, timed out at the shared deadline, and was
+  * the memory request was dispatched, timed out at the deadline, and was
     classified ``slow`` — never ``down``, never a written health verdict;
   * the recall's own aggregate ``elapsed_ms`` stays within the budget, and the
     whole process returns promptly rather than hanging on its worker threads.
@@ -22,9 +24,9 @@ import time
 import pytest
 from utils.hooklog import hook_events
 
-#: The recall budget handed to the hook, in seconds: every scope's deadline. Well above
-#: MIN_SCOPE_TIMEOUT so every scope is dispatched, well below the default so
-#: the test is quick.
+#: The recall budget handed to the hook, in seconds: the request's deadline.
+#: Well above MIN_SCOPE_TIMEOUT so the scope is dispatched, well below the
+#: default so the test is quick.
 DEADLINE_S = 1.0
 
 
@@ -100,20 +102,15 @@ def test_a_silent_server_costs_one_deadline_and_the_hook_still_exits_clean(
 
     events = hook_events(suite, temp_home)
     errors = [d for e, d in events if e == "recall_error"]
-    assert len(errors) == 4, f"expected every scope to time out once: {errors}"
-    assert {tuple(d["scope"]) for d in errors} == {
-        ("session",),
-        ("trace",),
-        ("session_context",),
-        ("graph",),
-    }, errors
+    assert len(errors) == 1, f"expected the one memory request to time out once: {errors}"
+    assert [tuple(d["scope"]) for d in errors] == [("graph",)], errors
     assert all(d["verdict"] == "slow" for d in errors), (
         f"a server that accepts but never answers is slow, not down: {errors}"
     )
     assert not [d for e, d in events if e == "recall_server_down"], events
     assert not [d for e, d in events if e == "recall_budget_exceeded"], events
-    assert black_hole.accepted >= 4, (
-        f"every scope must have reached the socket: {black_hole.accepted}"
+    assert black_hole.accepted >= 1, (
+        f"the memory request must have reached the socket: {black_hole.accepted}"
     )
 
     summary = next(
@@ -122,15 +119,15 @@ def test_a_silent_server_costs_one_deadline_and_the_hook_still_exits_clean(
     assert summary is not None, events
     per_scope = summary["per_scope"]
     assert all(not r.get("skipped") for r in per_scope.values()), per_scope
-    # Each scope ran for about one deadline — and the recall as a whole did too,
-    # because they overlapped. Sequential dispatch would read ~4 deadlines here.
+    # The request ran for about one deadline — and so did the recall as a
+    # whole: nothing else was in flight for it to wait on.
     for label, record in per_scope.items():
         assert DEADLINE_S * 1000 * 0.9 <= record["elapsed_ms"] <= DEADLINE_S * 1000 * 2, (
             label,
             record,
         )
     assert summary["elapsed_ms"] < DEADLINE_S * 1000 * 2, (
-        f"the fan-out took more than two deadlines — scopes did not overlap: {summary}"
+        f"the recall took more than two deadlines against one request: {summary}"
     )
     # And the process did not linger on its worker threads after the deadline.
     assert wall < DEADLINE_S + 20.0, f"hook took {wall:.1f}s against a {DEADLINE_S}s deadline"

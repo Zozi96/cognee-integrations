@@ -62,6 +62,43 @@ _LLM_STATE_STALE_SECONDS = 30 * 60
 # marker's own prune horizon (`_plugin_common._CREDITS_ENTRY_MAX_AGE_SECONDS`).
 _CREDITS_AGE_HINT_SECONDS = 15 * 60
 _CREDITS_MAX_AGE_SECONDS = 7 * 24 * 3600
+# A balance at or below this is "running out": the number turns red and the
+# top-up link appears. Not zero — the cloud stops serving before the balance
+# reaches zero (a 402 arrives with cents left), so zero is never observed.
+_CREDITS_LOW_USD = 1.0
+# Where to top up. Shown next to a low balance and next to a 402 refusal that
+# arrived without any balance reading. The production billing page, hardcoded:
+# the web frontend's host cannot be derived from the tenant's data-plane host
+# (``tenant-<id>.aws.cognee.ai`` pairs with ``platform.cognee.ai``, but
+# ``tenant-<id>.dev-aws.cognee.ai`` pairs with ``staging.cognee.ai`` — a lookup,
+# not a rule). Staging/dev sessions set ``COGNEE_BILLING_URL``.
+_BILLING_URL_DEFAULT = "https://platform.cognee.ai/billing"
+
+
+def _billing_url() -> str:
+    return os.environ.get("COGNEE_BILLING_URL", "").strip() or _BILLING_URL_DEFAULT
+
+
+def _payment_required_op(entry: dict) -> str:
+    """The operation the server last refused with HTTP 402, or "".
+
+    The hooks stamp ``payment_required: {op, at}`` on the tenant's entry when a
+    billable request comes back 402 and remove it on the next success. Stale
+    notes (older than the marker's prune horizon) are ignored: nothing has been
+    tried against this tenant for a week, so nothing is known about it.
+    """
+    note = entry.get("payment_required")
+    if not isinstance(note, dict):
+        return ""
+    op = str(note.get("op") or "").strip()
+    if not op:
+        return ""
+    try:
+        if time.time() - float(note.get("at", 0) or 0) > _CREDITS_MAX_AGE_SECONDS:
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return op
 
 
 def _credits_age_hint(age_seconds: float) -> str:
@@ -120,13 +157,6 @@ def _active_dataset(session_id: str = "") -> str:
         return v
     # 3. default
     return _DEFAULT_DATASET
-
-
-def _switched_marker(session_id: str = "") -> str:
-    """A faint ``· switched`` tag once the launch left its launch-time dataset."""
-    if _launch_record(session_id).get("switched_at"):
-        return " \033[2m· switched\033[0m"
-    return ""
 
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1", ""}
@@ -609,12 +639,7 @@ def _recall_segment(session_id: str) -> str:
 
     Default rendering, per turn at normal weight and the session total faint::
 
-        · 5 memory hits (3 from past sessions) · 12/40 turns had hits this session
-
-    ``from past sessions`` counts the graph passages not stamped with this
-    session's id (see ``_count_cross_session_hits`` in the lookup hook) —
-    the part of the hit that no amount of scrolling back would have given
-    Claude. It is omitted when zero.
+        · 5 memory hits · 12/40 turns had hits this session
 
     A session that has not had a single hit yet says so instead of showing a
     bare ``0/7`` (the graph is usually still filling up)::
@@ -639,15 +664,6 @@ def _recall_segment(session_id: str) -> str:
 
     total = sum(_int(hits, key) for key in hits)
     out = f" · {_plural(total, 'memory hit')}"
-    # Of those, the ones this conversation could not have produced: graph
-    # passages from earlier sessions (or remembered documents). This is the
-    # plugin's distinctive contribution, so it rides along at normal weight.
-    cross = min(_int(marker, "cross_session_hits"), total)
-    if cross == 1:
-        out += " (1 from a past session)"
-    elif cross > 1:
-        out += f" ({cross} from past sessions)"
-
     totals = marker.get("session_totals")
     if isinstance(totals, dict):
         turns = _int(totals, "turns")
@@ -719,17 +735,33 @@ def _credits_segment() -> str:
         return ""
     remaining = entry.get("remaining_usd")
     if not isinstance(remaining, (int, float)) or isinstance(remaining, bool):
-        return ""
-    try:
-        checked_at = float(entry.get("checked_at", 0) or 0)
-    except (TypeError, ValueError):
-        return ""
-    age = time.time() - checked_at
-    if age > _CREDITS_MAX_AGE_SECONDS:
-        return ""
-    color = "\033[32m" if remaining >= 0 else "\033[31m"
+        remaining = None
+    age = 0.0
+    if remaining is not None:
+        try:
+            age = time.time() - float(entry.get("checked_at", 0) or 0)
+        except (TypeError, ValueError):
+            remaining = None
+        if age > _CREDITS_MAX_AGE_SECONDS:
+            remaining = None
+    refused_op = _payment_required_op(entry)
+    if remaining is None:
+        if not refused_op:
+            return ""
+        # The server refused to pay for an operation but there is no balance to
+        # show (the billing fetch itself failed): the refusal is the segment, and
+        # the way out is the same as for a low balance — top up.
+        return f" · \033[31mcredits: not enough for {refused_op}\033[0m{_top_up_hint()}"
+    # Red from a dollar down: a balance about to run out is exactly the state the
+    # user most needs to see, and the cloud refuses requests before it reaches
+    # zero. Above that the number stays green even when the server refused an
+    # operation — the refusal is the red part, not the balance.
+    exhausted = remaining <= _CREDITS_LOW_USD
+    color = "\033[31m" if exhausted else "\033[32m"
     sign = "-" if remaining < 0 else ""
     seg = f" · {color}credits: {sign}${abs(remaining):,.2f}\033[0m"
+    if refused_op and not exhausted:
+        seg += f" \033[31m(not enough for {refused_op})\033[0m"
     last_op = entry.get("last_op")
     if isinstance(last_op, dict):
         label = str(last_op.get("label") or "").strip()
@@ -742,7 +774,16 @@ def _credits_segment() -> str:
     hint = _credits_age_hint(age)
     if hint:
         seg += f" \033[2m({hint})\033[0m"
+    if exhausted:
+        seg += _top_up_hint()
     return seg
+
+
+def _top_up_hint() -> str:
+    """Green so it reads as the way out, next to the red (low) balance. A plain URL:
+    terminals linkify it themselves, and Claude Code's status line is not
+    known to pass OSC 8 hyperlink escapes through."""
+    return f" · \033[32mtop up: {_billing_url()}\033[0m"
 
 
 def _forced_cloud_unconfigured() -> bool:
@@ -820,7 +861,7 @@ def main() -> None:
     # of the steady-state line.
     sys.stdout.write(
         f"{_status_prefix(_session_id)}"
-        f"cognee: {_active_dataset(_session_id)} · {_mode_label()}{_switched_marker(_session_id)}"
+        f"cognee: {_active_dataset(_session_id)} · {_mode_label()}"
         f"{_credits_segment()}{_recall_segment(_session_id)}{_update_segment()}"
     )
 

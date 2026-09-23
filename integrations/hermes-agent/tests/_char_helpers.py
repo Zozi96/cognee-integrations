@@ -57,6 +57,7 @@ class _SearchType:
     """
 
     GRAPH_COMPLETION = "GRAPH_COMPLETION"
+    HYBRID_COMPLETION = "HYBRID_COMPLETION"
     RAG_COMPLETION = "RAG_COMPLETION"
     CHUNKS = "CHUNKS"
     CHUNKS_LEXICAL = "CHUNKS_LEXICAL"
@@ -395,9 +396,7 @@ def make_provider(
         "write_timeout": 5,
         "improve_timeout": 5,
         "improve_background": "",
-        # The layered fan-out and the hit header have their own tests; the
-        # legacy single-call prefetch path stays characterized with both off.
-        "recall_session_layers": False,
+        # The hit header has its own tests; everything else runs without it.
         "memory_hits": False,
         **(config or {}),
     }

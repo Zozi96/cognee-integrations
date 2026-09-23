@@ -8,12 +8,12 @@ most importantly ``session_ids`` on ``improve()``, which is what bridges session
 memory into the permanent graph.
 
 **Wire contract** (first verified against cognee 1.2.1's routers, live-checked
-on the pinned 1.5.3):
+on the pinned 1.5.4):
 
 ===================  =========================================================
 ``recall``           ``POST /api/v1/recall``   JSON: ``query``, ``search_type``,
                      ``scope``, ``datasets``, ``top_k``, ``session_id``,
-                     ``context_profile``, ``code_query``, ``only_context``
+                     ``code_query``, ``only_context``
 ``remember_session`` ``POST /api/v1/remember`` multipart: ``data``,
                      ``datasetName``, ``session_id``
 ``remember_permanent`` ``POST /api/v1/remember`` multipart: ``data``,
@@ -29,8 +29,9 @@ on the pinned 1.5.3):
 ``list_dataset_data`` ``GET /api/v1/datasets/{id}/data``
 ``read_raw_data``    ``GET /api/v1/datasets/{id}/data/{id}/raw``
 ``index_repository`` ``POST /api/v1/remember`` multipart: ``datasetName``,
-                     ``content_type=code``, ``repositories``,
-                     ``run_in_background``, ``index_vectors`` (cognee >= 1.5.3)
+                     ``content_type=code``, ``raw_data``,
+                     ``run_in_background``, ``index_vectors`` (cognee >= 1.5.4;
+                     1.5.3 called the repo-spec field ``repositories``)
 ``dataset_pipeline_status`` ``GET /api/v1/datasets/status?dataset=&pipeline=``
 ===================  =========================================================
 
@@ -72,13 +73,37 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .backend import MemoryBackend
-from .config import SHARED_PLUGIN_STATE_DIR
+from .config import (  # noqa: F401 — DEFAULT_USER_* re-exported for callers/tests
+    DEFAULT_USER_EMAIL,
+    DEFAULT_USER_PASSWORD,
+    SHARED_PLUGIN_STATE_DIR,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_EMAIL = "default_user@example.com"
-DEFAULT_USER_PASSWORD = "default_password"
 _API_KEY_NAME = "hermes-owner-bootstrap"
+
+# How the server's login route phrases the two rejections a default-user login
+# can get (cognee 1.6.0 ``/api/v1/auth/login``, both HTTP 400). Matched
+# case-insensitively against the response body.
+_LOGIN_NO_PASSWORD_MARKER = "does not have a password"
+_LOGIN_BAD_CREDENTIALS_MARKER = "login_bad_credentials"
+
+_LOGIN_NO_PASSWORD_HINT = (
+    "the cognee server's default user has no password, so the plugin cannot "
+    "log in to mint an API key: cognee >= 1.6.0 creates the default user only "
+    "when the server is started with DEFAULT_USER_PASSWORD set (this plugin "
+    "sets it for the server it spawns, but not for one started elsewhere). "
+    "Start the server with DEFAULT_USER_PASSWORD set to the same value as "
+    "COGNEE_USER_PASSWORD (default: the plugin's built-in default), or set "
+    "COGNEE_API_KEY to a key issued by that server."
+)
+_LOGIN_BAD_CREDENTIALS_HINT = (
+    "the cognee server rejected the default-user login (LOGIN_BAD_CREDENTIALS): "
+    "COGNEE_USER_EMAIL / COGNEE_USER_PASSWORD do not match the server's "
+    "DEFAULT_USER_EMAIL / DEFAULT_USER_PASSWORD. Make them agree, or set "
+    "COGNEE_API_KEY to a key issued by that server."
+)
 
 # Log lines that betray an embedding-context overflow on the server. Grounded in
 # cognee's OllamaEmbeddingEngine: it logs "Ollama embedding error: <msg>" for the
@@ -119,6 +144,16 @@ class CogneeHttpError(RuntimeError):
     def __init__(self, status: int, message: str):
         super().__init__(message)
         self.status = status
+
+
+class CogneeLoginRejected(CogneeHttpError):
+    """The default-user login was reached and refused for a *diagnosed* reason.
+
+    Distinguishes "this server has no login to mint from" (auth disabled, 404 —
+    quietly proceed without a key) from "this server wants a key and the login
+    we would mint it with is misconfigured", which the user has to fix. The
+    message is the actionable hint.
+    """
 
 
 class CogneeUnreachable(RuntimeError):
@@ -213,6 +248,10 @@ class HttpBackend(MemoryBackend):
         # tests; None means "resolve the spawned server's default at connect()".
         self._server_log_path = server_log_path
         self._log_offset: Optional[int] = None
+        # Set when connect() proceeded without a key because the default-user
+        # login was rejected for a known reason; appended to any later 401 so
+        # the failure the user actually sees names the fix.
+        self._auth_hint = ""
 
     # -- transport ---------------------------------------------------------
 
@@ -275,9 +314,10 @@ class HttpBackend(MemoryBackend):
                 detail = exc.read().decode("utf-8")[:300]
             except Exception:
                 pass
-            raise CogneeHttpError(
-                exc.code, f"{method} {path} failed (HTTP {exc.code}): {detail or exc.reason}"
-            ) from exc
+            message = f"{method} {path} failed (HTTP {exc.code}): {detail or exc.reason}"
+            if exc.code == 401 and self._auth_hint:
+                message = f"{message}. No API key was sent because {self._auth_hint}"
+            raise CogneeHttpError(exc.code, message) from exc
         except Exception as exc:  # URLError / timeout / OSError
             raise CogneeUnreachable(f"cognee unreachable at {url}: {str(exc)[:200]}") from exc
 
@@ -514,6 +554,14 @@ class HttpBackend(MemoryBackend):
             )
         try:
             key = self._mint_api_key(timeout=timeout)
+        except CogneeLoginRejected as exc:
+            # The server answered the login and refused it for a reason the user
+            # can act on. Still not fatal here — the server may not require a
+            # key — but say so loudly, and remember the hint for the 401 that
+            # follows if it does.
+            self._auth_hint = str(exc)
+            logger.warning("could not mint a cognee API key (continuing without): %s", exc)
+            return ""
         except Exception as exc:
             # A local server with authentication disabled needs no key at all, so
             # this is not fatal — proceed unauthenticated and let the first real
@@ -529,12 +577,21 @@ class HttpBackend(MemoryBackend):
         email = os.environ.get("COGNEE_USER_EMAIL", DEFAULT_USER_EMAIL)
         password = os.environ.get("COGNEE_USER_PASSWORD", DEFAULT_USER_PASSWORD)
 
-        login = self._request(
-            "POST",
-            "/api/v1/auth/login",
-            timeout=timeout,
-            form_body={"username": email, "password": password},
-        )
+        try:
+            login = self._request(
+                "POST",
+                "/api/v1/auth/login",
+                timeout=timeout,
+                form_body={"username": email, "password": password},
+            )
+        except CogneeHttpError as exc:
+            if exc.status == 400:
+                body = str(exc).lower()
+                if _LOGIN_NO_PASSWORD_MARKER in body:
+                    raise CogneeLoginRejected(400, _LOGIN_NO_PASSWORD_HINT) from exc
+                if _LOGIN_BAD_CREDENTIALS_MARKER in body:
+                    raise CogneeLoginRejected(400, _LOGIN_BAD_CREDENTIALS_HINT) from exc
+            raise
         token = str((login or {}).get("access_token") or "")
         if not token:
             raise CogneeHttpError(200, "login returned no access token")
@@ -567,7 +624,6 @@ class HttpBackend(MemoryBackend):
         auto_route,
         query_type,
         scope=None,
-        context_profile=None,
         code_query=None,
         only_context=False,
         timeout,
@@ -586,26 +642,22 @@ class HttpBackend(MemoryBackend):
             body["session_id"] = session_id
         if datasets:
             body["datasets"] = datasets
-        if scope:
-            # State the scope outright. Without it the server infers sources from
-            # the other fields, and that inference requires a null search_type —
-            # so a caller who set COGNEE_AUTO_ROUTE=false would lose the session
-            # cache as a side effect of choosing a search strategy. A list scope
-            # (e.g. ["session", "trace", "session_context"]) travels as-is: the
-            # endpoint accepts a name or a list of names.
-            body["scope"] = scope
-        if context_profile:
-            # "agent" selects the distilled agent-guidance rendering for the
-            # session_context scope, matching the claude-code/codex recall.
-            body["context_profile"] = context_profile
+        # State the scope outright, always. Left out, the server resolves it to
+        # ``auto`` and — while search_type is null and a session id travels —
+        # folds the session cache into the sources. Memory is read from the
+        # graph only, so an unstated scope is ``["graph"]``. A list travels
+        # as-is: the endpoint accepts a name or a list of names.
+        body["scope"] = scope or ["graph"]
         if code_query is not None:
             # Deterministic code-graph lane (cognee >= 1.5.3): only meaningful
             # when the scope includes "code" — the server rejects it otherwise.
             body["code_query"] = code_query
         if only_context:
-            # Skip the server-side LLM completion and return raw context. The
-            # layered per-scope recall uses this: it renders results itself, so
-            # paying an LLM call per scope would only add latency.
+            # Skip the server-side LLM completion. For a completion search type
+            # on cognee >= 1.6.0 the graph item's ``text`` is then the full
+            # prompt the completion would have read (history + context +
+            # guidance, built from ``session_id``); older servers return the
+            # bare context. The per-prompt memory lane injects that verbatim.
             body["only_context"] = True
         # Always sent, null included: the endpoint defaults a *missing*
         # search_type to GRAPH_COMPLETION for backward compatibility, and only an
@@ -740,7 +792,7 @@ class HttpBackend(MemoryBackend):
         result = self._request("POST", "/api/v1/forget", timeout=timeout, json_body=body)
         return result if isinstance(result, dict) else {}
 
-    # -- code graph (cognee >= 1.5.3) ----------------------------------------
+    # -- code graph (cognee >= 1.5.4) ----------------------------------------
 
     def index_repository(
         self,
@@ -756,7 +808,11 @@ class HttpBackend(MemoryBackend):
             {
                 "datasetName": dataset,
                 "content_type": "code",
-                "repositories": str(repo),
+                # cognee >= 1.5.4 reads the repo spec from raw_data; 1.5.3
+                # called the field repositories. A 1.5.4 server ignores the old
+                # name outright (unknown Form parts are dropped), so the spec
+                # never arrives and the index 400s — see issue #420.
+                "raw_data": str(repo),
                 "run_in_background": "true" if run_in_background else "false",
                 "index_vectors": "true" if index_vectors else "false",
             },
@@ -767,12 +823,17 @@ class HttpBackend(MemoryBackend):
                 "POST", "/api/v1/remember", timeout=timeout, multipart=multipart
             )
         except CogneeHttpError as exc:
-            if exc.status == 400 and "content_type" in str(exc):
-                # An older server (< 1.5.3) rejects content_type='code' outright.
+            if exc.status == 400 and "unsupported content_type" in str(exc).lower():
+                # An older server rejects the content_type value outright, and
+                # says so in those words. Matching a bare "content_type"
+                # substring would also swallow a current server's code-branch
+                # 400s (which all name the field), reporting a contract or
+                # argument error as "your server is too old". Those re-raise
+                # unchanged, so the caller sees the server's own message.
                 raise CogneeHttpError(
                     exc.status,
                     "the cognee server rejected content_type='code' — repo indexing "
-                    "requires cognee >= 1.5.3; upgrade the server and retry. "
+                    "requires cognee >= 1.5.4; upgrade the server and retry. "
                     f"Detail: {exc}",
                 ) from exc
             raise
