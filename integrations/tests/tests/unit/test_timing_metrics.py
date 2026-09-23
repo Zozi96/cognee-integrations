@@ -17,7 +17,9 @@ Both halves run on every registered suite. The aggregate per-prompt total was
 claude-code only until the recall scopes were dispatched concurrently: with the
 per-scope timings overlapping instead of adding up, the total stopped being
 derivable from ``per_scope`` alone, so codex and antigravity now log it too (the
-``has_recall_latency_metric`` flag was retired with that port). The per-scope
+``has_recall_latency_metric`` flag was retired with that port). Since the
+one-request memory contract of cognee 1.6.0 (SDK-741) the only second request
+the hook can make is the code lane, so the overlap test arms it. The per-scope
 breakdown is asserted for all registered suites in test_recall_per_scope.py.
 
 Migrated from claude-code/tests/test_hook_timing.py, which ran in no CI job on any
@@ -29,7 +31,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from utils.recall import drive_recall
+from utils.recall import arm_code_lane, drive_recall
 
 
 @pytest.fixture
@@ -67,7 +69,9 @@ def test_elapsed_ms_measures_the_delta_in_milliseconds(pc, monkeypatch):
 
 def test_a_recall_hit_carries_its_elapsed_ms(lookup, monkeypatch):
     run = drive_recall(
-        lookup, monkeypatch, recall={"session": [{"question": "q1", "answer": "a1"}]}
+        lookup,
+        monkeypatch,
+        recall={"graph": [{"source": "graph", "text": "The question is: `q1`\n\nContext:\n`a1`"}]},
     )
 
     detail = run.detail("context_lookup_hit")
@@ -93,11 +97,12 @@ def test_a_recall_miss_carries_its_elapsed_ms(lookup, monkeypatch):
 def test_the_aggregate_is_the_fan_out_wall_time_not_the_sum_of_scopes(lookup, monkeypatch):
     """Scopes overlap, so the total tracks the slowest scope, not their sum.
 
-    This is the reason every suite now carries the aggregate: two scopes of
-    0.3s dispatched together cost ~0.3s, and only the aggregate can say so —
-    summing ``per_scope`` reads ~0.6s.
+    This is the reason every suite now carries the aggregate: two requests of
+    0.3s (memory plus the armed code lane) dispatched together cost ~0.3s, and
+    only the aggregate can say so — summing ``per_scope`` reads ~0.6s.
     """
-    sleeps = {"session": 0.3, "trace": 0.3}
+    arm_code_lane(monkeypatch)
+    sleeps = {"graph": 0.3, "code": 0.3}
 
     def slow(_prompt, **kw):
         time.sleep(sleeps.get(kw["scope"][0], 0))

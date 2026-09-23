@@ -147,7 +147,7 @@ def test_plugin_manifest_identifies_cognee_with_a_version_string(plugin_root):
     spec = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
 
     assert spec["name"] == "cognee"
-    assert spec["version"] == "1.5.2"
+    assert spec["version"] == "1.6.0"
 
 
 def test_hooks_manifest_is_at_plugin_root_not_claude_hooks_directory(manifest):
@@ -562,7 +562,7 @@ def test_search_shell_keeps_the_shared_recall_breaker(monkeypatch, tmp_path):
         }
     )
     result = subprocess.run(
-        ["bash", str(SCRIPTS_DIR / "cognee-search.sh"), "question", "--session"],
+        ["bash", str(SCRIPTS_DIR / "cognee-search.sh"), "question", "--graph"],
         cwd=tmp_path,
         env=env,
         check=True,

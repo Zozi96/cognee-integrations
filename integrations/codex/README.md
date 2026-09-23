@@ -70,6 +70,8 @@ EOF
 chmod 600 ~/.cognee/.env
 ```
 
+**Default user and its password.** The local server is started with `DEFAULT_USER_EMAIL=default_user@example.com` and `DEFAULT_USER_PASSWORD=default_password`, which is how cognee 1.6.0 and later create the default user at all (a server started without `DEFAULT_USER_PASSWORD` creates no default account, and the password is set once and never rewritten). The plugin logs in as that user to mint its owner API key, so a fresh install needs no manual step and an existing install keeps working. Exporting `DEFAULT_USER_EMAIL`/`DEFAULT_USER_PASSWORD` yourself overrides what the plugin passes; `COGNEE_USER_EMAIL`/`COGNEE_USER_PASSWORD` pick the user the plugin logs in as, and a non-default user must already exist on the server. When pointing at a server you run yourself (`COGNEE_BASE_URL`), either start it with `DEFAULT_USER_PASSWORD` set to the same value as `COGNEE_USER_PASSWORD`, or set `COGNEE_API_KEY` so no login is needed; a server without either answers the login with an error that says so.
+
 **Windows (PowerShell)** — same idea, same file:
 
 ```powershell
@@ -112,10 +114,10 @@ On startup the statusline shows `cognee: <dataset> · local` (or `· cloud`) to 
 Every prompt's recalled context opens with a one-line memory header:
 
 ```
-Cognee memory: 5 memory hits (3 from past sessions) · 12/40 turns had hits this session · saved last turn 1 prompt / 3 trace / 1 answer
+Cognee memory: 5 memory hits · 12/40 turns had hits this session · saved last turn 1 prompt / 3 trace / 1 answer
 ```
 
-`5 memory hits` is how many memories this turn's lookup found and injected (across session turns, traces, graph context and agent guidance); `3 from past sessions` is the part the model could not have known from this conversation — knowledge-graph passages from an earlier session or a `remember`-ed document (omitted when zero); `12/40 turns had hits this session` is the running total, reading `memory warming up (7 turns)` until the first hit; `saved last turn` is what the previous turn persisted — on the server. The counts are also written to `~/.cognee-plugin/codex/last_recall.json`.
+`5 memory hits` is how many memory blocks this turn's lookup found and injected (the memory request, plus code-graph facts when that lane is armed); `12/40 turns had hits this session` is the running total, reading `memory warming up (7 turns)` until the first hit; `saved last turn` is what the previous turn persisted — on the server. The counts are also written to `~/.cognee-plugin/codex/last_recall.json`.
 
 When the server cannot be reached, traces and answers are buffered locally and replayed later; those are never counted as saved. Instead the header grows two segments — `buffered last turn 6 trace / 1 answer (not saved yet) · 7 awaiting replay, oldest 20d` — so an outage is visible on every prompt, including prompts whose recall was skipped because the server is known to be down (`Cognee memory: recall skipped (server unreachable) · …`). Both segments disappear once the buffer has drained.
 
@@ -337,7 +339,7 @@ A **failed** attempt arms the same window as a **backoff**: if the submit timed 
 |---|---|---|
 | `COGNEE_IDLE_POLL` | `10` | Poll interval in seconds |
 | `COGNEE_IDLE_THRESHOLD` | `60` | Seconds of inactivity before idle improve fires |
-| `COGNEE_IMPROVE_COOLDOWN` | `600` | Minimum seconds between automatic (idle/auto) improves of one session; persisted per session |
+| `COGNEE_IMPROVE_COOLDOWN` | `1800` | Minimum seconds between automatic (idle/auto) improves of one session; persisted per session |
 | `COGNEE_AUTO_IMPROVE_EVERY` | `150` | Stored tool calls/stops between automatic improves (`0` disables) |
 | `COGNEE_IMPROVE_SUBMIT_TIMEOUT` | `420` | Read timeout for the improve POST (agent-context extraction and distillation run inside the request) |
 
@@ -621,7 +623,7 @@ Keys are letters, digits, and underscores. Values are taken literally — no `$V
 | local LLM | `LLM_API_KEY`, `LLM_MODEL` | unset | Required for local mode runtime |
 | idle watcher poll | `COGNEE_IDLE_POLL` | `10` | Idle watcher poll interval in seconds |
 | idle watcher threshold | `COGNEE_IDLE_THRESHOLD` | `60` | Seconds of inactivity before idle improve fires |
-| improve cooldown | `COGNEE_IMPROVE_COOLDOWN` | `600` | Minimum seconds between automatic (idle/auto) improves of one session |
+| improve cooldown | `COGNEE_IMPROVE_COOLDOWN` | `1800` | Minimum seconds between automatic (idle/auto) improves of one session |
 | auto-improve threshold | `COGNEE_AUTO_IMPROVE_EVERY` | `150` | Stored tool calls/stops between automatic improves (`0` disables) |
 | improve submit timeout | `COGNEE_IMPROVE_SUBMIT_TIMEOUT` | `420` | Read timeout for the improve POST |
 

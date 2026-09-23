@@ -1,6 +1,6 @@
 ---
 name: cognee-recall
-description: Searches Cognee memory (session cache and permanent knowledge graph) to retrieve relevant context. Can filter by data category (user, project, agent). Session memory is auto-searched on every prompt; use this agent for deeper or cross-session searches.
+description: Searches Cognee memory (the permanent knowledge graph, and an indexed repository's code graph) to retrieve relevant context. Can filter by data category (user, project, agent). Memory is auto-recalled on every prompt; use this agent for deeper or targeted searches.
 model: haiku
 maxTurns: 3
 ---
@@ -31,7 +31,7 @@ Run **one** broad search via the wrapper and answer from it. It queries the **ru
 "${CLAUDE_PLUGIN_ROOT}/scripts/cognee-search.sh" "<query>" 10
 ```
 
-**Do not fan out into many targeted calls.** One broad search plus the context the `UserPromptSubmit` hook already injects on every turn is enough — multiple calls just add latency and (un-allowlisted) permission prompts for the user. Use `--graph` or `--session` only when you specifically need to narrow scope.
+**Do not fan out into many targeted calls.** One broad search plus the context the `UserPromptSubmit` hook already injects on every turn is enough — multiple calls just add latency and (un-allowlisted) permission prompts for the user. Memory is read from the knowledge graph (and the code graph via `--code`) only; there is no session-cache search.
 
 **Manual ground-truth only (not part of the normal flow):** if a result is empty and you genuinely doubt it, you may confirm directly. Category filtering uses `node_name` (the CLI doesn't expose it):
 ```bash
@@ -71,7 +71,7 @@ request), run that command directly and label the results with the dataset.
 
 ## Output
 
-Parse the JSON results (`"_source": "session"` = current session; `"_source": "graph"` = permanent graph). Return a concise summary by relevance, noting the source.
+Parse the JSON results (`"source": "graph"` = permanent knowledge graph; on cognee 1.6.0 and later its `text` is the full prompt cognee would have answered from, history and retrieved context included; `"source": "code"` = code-graph facts). Return a concise summary by relevance, noting the source.
 
 If the **server** genuinely returns nothing, then suggest:
 - `/cognee-memory:cognee-sync` to sync session data to the permanent graph

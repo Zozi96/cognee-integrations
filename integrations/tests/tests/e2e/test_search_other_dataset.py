@@ -75,14 +75,13 @@ def test_foreign_dataset_is_a_graph_only_read_by_uuid(
     assert "session_id" not in body and "datasets" not in body
 
 
-def test_foreign_dataset_forces_graph_scope_even_when_session_was_asked(
+def test_foreign_dataset_drops_the_session_id_without_a_flag(
     suite, temp_home, mock_server, assert_clean_real_home
 ):
     result = run_search(
         suite,
         "anything",
         "5",
-        "--session",
         "--dataset-id",
         OTHER_ID,
         home=temp_home,
@@ -90,13 +89,12 @@ def test_foreign_dataset_forces_graph_scope_even_when_session_was_asked(
         extra={"COGNEE_SESSION_ID": "pinned_session"},
     )
     assert result.returncode == 0, result.stderr
-    assert "not this session's active dataset" in result.stderr
     body = _recall_body(mock_server)
     assert body["scope"] == ["graph"] and "session_id" not in body
     assert body["dataset_ids"] == [OTHER_ID]
 
 
-def test_active_dataset_named_by_hand_keeps_the_full_scope(
+def test_active_dataset_named_by_hand_keeps_the_session_id(
     suite, temp_home, mock_server, assert_clean_real_home
 ):
     result = run_search(
@@ -110,9 +108,10 @@ def test_active_dataset_named_by_hand_keeps_the_full_scope(
         extra={"COGNEE_SESSION_ID": "pinned_session", "COGNEE_PLUGIN_DATASET": "agent_sessions"},
     )
     assert result.returncode == 0, result.stderr
-    assert "not this session's active dataset" not in result.stderr
     body = _recall_body(mock_server)
-    assert body["scope"] == ["session", "graph"]
+    # Graph only, even for the active dataset: the session cache is never searched,
+    # but the session id travels so the graph item can carry this session's history.
+    assert body["scope"] == ["graph"]
     assert body["session_id"] == "pinned_session"
     assert body["datasets"] == ["agent_sessions"]
 

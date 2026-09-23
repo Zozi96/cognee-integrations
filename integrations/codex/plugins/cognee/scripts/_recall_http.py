@@ -126,14 +126,21 @@ def coerce_top_k(value, default=5):
     return n if n > 0 else default
 
 
-def coerce_scope(value, default="auto"):
-    """Parse the JSON scope arg; fall back to "auto" on anything malformed."""
+def coerce_scope(value, default=None):
+    """Parse the JSON scope arg; graph-only on anything empty or malformed.
+
+    Memory is read from the graph and the code graph only. The server's
+    ``auto`` scope would fold raw session entries in, so it is never the
+    fallback here.
+    """
+    if default is None:
+        default = ["graph"]
     if not value:
-        return default
+        return list(default)
     try:
         return json.loads(value)
     except (TypeError, ValueError):
-        return default
+        return list(default)
 
 
 def _error(status, message, *, transient=False):
@@ -258,6 +265,15 @@ def do_recall(
     except urllib.error.HTTPError as e:
         # Reachable but rejected/failed. NOT an authoritative empty, and NOT a
         # reason to query a different backend via the CLI — report the error.
+        if e.code == 404:
+            # cognee >= 1.6.0 answers a dataset with no graph yet, or a dataset
+            # name that resolves to nothing, with 404 (DatasetNotFoundError)
+            # instead of an empty list. Nothing can be found there: an
+            # authoritative empty, not a failure, and not a reason to fall back.
+            sys.stderr.write(
+                "[cognee-search] no graph for this dataset yet (HTTP 404) — empty result\n"
+            )
+            return []
         if e.code in (401, 403):
             msg = "unauthorized (HTTP %s) — check COGNEE_API_KEY / credentials" % e.code
         else:

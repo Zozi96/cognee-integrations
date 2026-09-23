@@ -113,5 +113,6 @@ def test_coerce_top_k(rh):
 
 def test_coerce_scope(rh):
     assert rh.coerce_scope('["graph"]') == ["graph"]
-    assert rh.coerce_scope("not json") == "auto"
-    assert rh.coerce_scope("") == "auto"
+    # Graph-only on anything empty or malformed: "auto" would fold session entries in.
+    assert rh.coerce_scope("not json") == ["graph"]
+    assert rh.coerce_scope("") == ["graph"]

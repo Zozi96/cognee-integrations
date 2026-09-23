@@ -221,21 +221,23 @@ class TestRecallWireFormat(unittest.TestCase):
         self.assertNotEqual(on["search_type"], off["search_type"])
 
     def test_scope_is_stated_outright(self):
-        for scope in ("session", "graph", "auto"):
+        for scope in (["graph"], ["code"]):
             body = self._recall(scope=scope)[0].json_body("/api/v1/recall")
             self.assertEqual(body["scope"], scope)
 
     def test_scope_survives_an_explicit_search_type(self):
         # The server infers sources from session_id/datasets only while
-        # search_type is null, so a caller who pins a search strategy (or sets
-        # COGNEE_AUTO_ROUTE=false) would otherwise lose the session cache as a
-        # side effect. The stated scope is what keeps that independent.
-        body = self._recall(scope="session", auto_route=False)[0].json_body("/api/v1/recall")
-        self.assertEqual(body["scope"], "session")
+        # search_type is null; the stated scope keeps the request meaning the
+        # same whether or not a search strategy is pinned.
+        body = self._recall(scope=["graph"], auto_route=False)[0].json_body("/api/v1/recall")
+        self.assertEqual(body["scope"], ["graph"])
         self.assertEqual(body["search_type"], "GRAPH_COMPLETION")
 
-    def test_absent_scope_is_omitted(self):
-        self.assertNotIn("scope", self._recall(scope=None)[0].json_body("/api/v1/recall"))
+    def test_absent_scope_is_stated_as_the_graph(self):
+        # Left out, the server would resolve the scope to ``auto`` and fold the
+        # session cache in alongside the session id; memory reads the graph only.
+        body = self._recall(scope=None)[0].json_body("/api/v1/recall")
+        self.assertEqual(body["scope"], ["graph"])
 
 
 class TestRememberWireFormat(unittest.TestCase):
@@ -590,6 +592,78 @@ class TestApiKeyResolution(unittest.TestCase):
         backend = self._connect(opener)
         self.assertEqual(backend.api_key, "")
 
+    @staticmethod
+    def _login_400(detail):
+        # cognee 1.6.0's login answers HTTP 400 with a JSON ``detail``; the fake
+        # needs a readable body for _request to pick that detail up.
+        body = io.BytesIO(json.dumps({"detail": detail}).encode("utf-8"))
+        return urllib.error.HTTPError(_URL, 400, "Bad Request", {}, body)
+
+    def test_a_passwordless_default_user_names_the_fix(self):
+        # cognee >= 1.6.0 creates the default user without a password unless the
+        # server was started with DEFAULT_USER_PASSWORD. Connect still succeeds
+        # (the server may not require a key) but the warning must be actionable.
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400(
+            "This user does not have a password. Use API key authentication."
+        )
+        with self.assertLogs("cognee_integration_hermes.http_backend", level="WARNING") as logs:
+            backend = self._connect(opener)
+        self.assertEqual(backend.api_key, "")
+        text = "\n".join(logs.output)
+        self.assertIn("DEFAULT_USER_PASSWORD", text)
+        self.assertIn("COGNEE_USER_PASSWORD", text)
+        self.assertIn("COGNEE_API_KEY", text)
+        self.assertIn("1.6.0", text)
+
+    def test_the_passwordless_hint_reaches_the_first_401(self):
+        # The provider surfaces failures by stringifying the exception, so the
+        # 401 a keyless call gets must carry the hint — that is the user-visible path.
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400(
+            "This user does not have a password. Use API key authentication."
+        )
+        with self.assertLogs("cognee_integration_hermes.http_backend", level="WARNING"):
+            backend = self._connect(opener)
+        opener.responses["/api/v1/recall"] = urllib.error.HTTPError(
+            _URL, 401, "Unauthorized", {}, io.BytesIO(b'{"detail": "Unauthorized"}')
+        )
+        with self.assertRaises(CogneeHttpError) as ctx:
+            backend.recall(
+                query="q",
+                session_id=None,
+                datasets=None,
+                top_k=5,
+                auto_route=True,
+                query_type=None,
+                timeout=_TIMEOUT,
+            )
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertIn("DEFAULT_USER_PASSWORD", str(ctx.exception))
+        self.assertIn("COGNEE_API_KEY", str(ctx.exception))
+
+    def test_bad_credentials_name_the_env_vars(self):
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400("LOGIN_BAD_CREDENTIALS")
+        with self.assertLogs("cognee_integration_hermes.http_backend", level="WARNING") as logs:
+            backend = self._connect(opener)
+        self.assertEqual(backend.api_key, "")
+        text = "\n".join(logs.output)
+        self.assertIn("LOGIN_BAD_CREDENTIALS", text)
+        self.assertIn("COGNEE_USER_EMAIL", text)
+        self.assertIn("COGNEE_USER_PASSWORD", text)
+        self.assertIn("COGNEE_API_KEY", text)
+
+    def test_an_undiagnosed_login_failure_stays_quiet(self):
+        # A 404 (auth disabled) or an unrecognised 400 is the pre-existing
+        # "proceed without a key" case: debug-level only, no warning, no hint.
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400("something else")
+        with self.assertNoLogs("cognee_integration_hermes.http_backend", level="WARNING"):
+            backend = self._connect(opener)
+        self.assertEqual(backend.api_key, "")
+        self.assertEqual(backend._auth_hint, "")
+
     def test_a_remote_target_without_a_key_fails_at_connect(self):
         # Cognee Cloud exposes no login route to mint from; continuing without a
         # key would smear one clear startup error into a 401 on every call.
@@ -742,13 +816,15 @@ class TestProviderOverHttp(unittest.TestCase):
         out = json.loads(self._provider(opener).handle_tool_call("cognee_recall", {"query": "q"}))
         self.assertEqual(out, {"result": "No relevant Cognee memory found.", "count": 0})
 
-    def test_scope_routing_survives_the_whole_stack(self):
+    def test_graph_scope_survives_the_whole_stack(self):
         opener = FakeOpener({"/api/v1/recall": []})
         provider = self._provider(opener, session_cognee_id="hermes_sX")
-        provider.handle_tool_call("cognee_recall", {"query": "q", "scope": "graph"})
+        # A legacy ``scope`` argument is ignored on the way through.
+        provider.handle_tool_call("cognee_recall", {"query": "q", "scope": "session"})
         body = opener.json_body("/api/v1/recall")
+        self.assertEqual(body["scope"], ["graph"])
         self.assertEqual(body["datasets"], ["hermes"])
-        self.assertNotIn("session_id", body)
+        self.assertEqual(body["session_id"], "hermes_sX")
 
     def test_remember_reports_the_server_status(self):
         # The trap: an HTTP dict has no .status attribute, so a bare dict here
