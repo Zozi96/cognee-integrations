@@ -108,6 +108,9 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:exit_watcher_prune_failed` | `exit.watcher_prune_failed` |
 | `hook:exit_watcher_started` | `exit.watcher_started` |
 | `hook:extras_probe_failed` | `extras.probe_failed` |
+| `hook:file_context_error` | `file_context.error` |
+| `hook:file_context_injected` | `file_context.injected` |
+| `hook:file_context_skipped` | `file_context.skipped` |
 | `hook:final_sync_once_already_claimed` | `sync.sync_once_already_claimed` |
 | `hook:final_sync_once_claim_failed` | `sync.sync_once_claim_failed` |
 | `hook:final_sync_once_claimed` | `sync.sync_once_claimed` |
@@ -132,12 +135,12 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:json_load_failed` | `json.load_failed` |
 | `hook:json_write_failed` | `json.write_failed` |
 | `hook:last_recall_write_failed` | `last.recall_write_failed` |
-| `hook:list_datasets_failed` | `datasets.list_failed` |
 | `hook:launch_dataset_ids_skipped` | `launch.dataset_ids_skipped` |
 | `hook:legacy_config_json_removed` | `legacy.config_json_removed` |
 | `hook:legacy_config_json_unlink_failed` | `legacy.config_json_unlink_failed` |
 | `hook:legacy_resolved_dir_remove_failed` | `legacy.resolved_dir_remove_failed` |
 | `hook:legacy_resolved_unlink_failed` | `legacy.resolved_unlink_failed` |
+| `hook:list_datasets_failed` | `datasets.list_failed` |
 | `hook:llm_state_clear_failed` | `llm.state_clear_failed` |
 | `hook:llm_state_write_failed` | `llm.state_write_failed` |
 | `hook:map_create_failed` | `map.create_failed` |
@@ -171,6 +174,7 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:prompt_watcher_alive_check_failed` | `prompt.watcher_alive_check_failed` |
 | `hook:prompt_watcher_log_open_failed` | `prompt.watcher_log_open_failed` |
 | `hook:prompt_watcher_stop_unlink_failed` | `prompt.watcher_stop_unlink_failed` |
+| `hook:readable_datasets_refresh_failed` | `datasets.readable_refresh_failed` |
 | `hook:recall_audit_write_failed` | `recall.audit_write_failed` |
 | `hook:recall_auth_rejected` | `recall.auth_rejected` |
 | `hook:recall_breaker_open` | `recall.breaker_open` |
@@ -179,7 +183,6 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:recall_error` | `recall.error` |
 | `hook:recall_graph_not_built` | `recall.graph_not_built` |
 | `hook:recall_health_accounting_failed` | `recall.health_accounting_failed` |
-| `hook:readable_datasets_refresh_failed` | `datasets.readable_refresh_failed` |
 | `hook:recall_server_down` | `recall.server_down` |
 | `hook:recall_skipped_not_ready` | `recall.skipped_not_ready` |
 | `hook:run_exception` | `run.exception` |
@@ -279,9 +282,9 @@ Names cover current hooks, configuration, transcript cleanup, and both watchers.
 | `hook:watcher_stop_unlink_failed` | `watcher.stop_unlink_failed` |
 | `hook:watcher_stop_write_failed` | `watcher.stop_write_failed` |
 | `idle-watcher:activity_read_failed` | `idle_watcher.activity_read_failed` |
-| `idle-watcher:bridge_failed` | `idle_watcher.bridge_failed` |
 | `idle-watcher:bridge_done` | `idle_watcher.bridge_done` |
 | `idle-watcher:bridge_error` | `idle_watcher.bridge_error` |
+| `idle-watcher:bridge_failed` | `idle_watcher.bridge_failed` |
 | `idle-watcher:bridge_skipped_no_auth` | `idle_watcher.bridge_skipped_no_auth` |
 | `idle-watcher:bridge_target_resolve_failed` | `idle_watcher.bridge_target_resolve_failed` |
 | `idle-watcher:bridge_target_switched` | `idle_watcher.bridge_target_switched` |

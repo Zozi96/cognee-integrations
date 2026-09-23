@@ -10,6 +10,25 @@ Code only offers an update when that string changes. Tag releases as
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0]
+
+### Added
+- **File-scoped context on `Read` (`PreToolUse`).** A new hook, `file-context.py`,
+  runs before every `Read` of a source file inside an indexed repository and injects
+  what the code graph knows about that file as `additionalContext`: symbols grouped by
+  kind with line numbers, cross-file calls, and imports — a map the model gets before
+  the territory. Deterministic (`query_facts` filtered to the file; no LLM or embedding
+  call), ~100 ms warm against the repo's own dataset, bounded by
+  `COGNEE_FILE_CONTEXT_BUDGET` (3 s), and served once per file per session
+  (`COGNEE_FILE_CONTEXT_TTL`, 30 min). Never blocks or alters the read. Silent for
+  files outside indexed repos, non-code files, sensitive paths (capture deny list), a
+  server known down, or an open breaker. `COGNEE_FILE_CONTEXT_SCOPES=code,graph` adds
+  up to three knowledge-graph hits about the file (opt-in: it costs a graph search).
+  `COGNEE_FILE_CONTEXT=false` turns it off.
+
+### Changed
+- New events: `file_context.{injected,skipped,error}`.
+
 ## [1.5.7]
 
 ### Fixed

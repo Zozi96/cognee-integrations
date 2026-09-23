@@ -296,6 +296,7 @@ so the prompt path never waits on it.
 |---|---|
 | `SessionStart` | mode select, identity setup, dataset readiness, watcher bootstrap |
 | `UserPromptSubmit` | dataset-scoped context lookup + async prompt staging |
+| `PreToolUse` (`Read`) | [file-scoped context](#file-context-on-read): code-graph facts about the file about to be read, injected as `additionalContext` |
 | `PostToolUse` | async trace write |
 | `Stop` | assistant answer write + optional transcript clear hook |
 | `PreCompact` | memory anchor build before compaction |
@@ -436,6 +437,41 @@ knows.
 
 Automatic indexing skips directories that are not git repositories, hold no source
 files, or exceed 3000 source files. Explicit indexing has no size cap.
+
+### File context on Read
+
+Every `Read` of a source file inside an indexed repository is preceded by a
+`PreToolUse` hook (`file-context.py`) that hands the model what the code graph knows
+about that file *before* the contents arrive — a map, so it can jump to the right line
+instead of scrolling, and see which other files the read one leans on:
+
+```
+## Cognee: about base_config.py
+Symbols in cognee/base_config.py (name:line):
+  classes: BaseConfig:22
+  functions: _tracing_explicitly_disabled:15 (private), get_base_config:168
+  methods: BaseConfig.validate_personalization_knobs:60, BaseConfig.validate_paths:78, BaseConfig.to_dict:156
+Calls out to: cognee/root_dir (ensure_absolute_path, get_absolute_path); cognee/shared/logging_utils (get_logger)
+Imports: base64, cognee.modules.observability.observers, cognee.root_dir, ...
+(Cognee file context — from the code graph; for callers or impact use `cognee-search.sh "<symbol>" --code`.)
+```
+
+It is purely additive (never blocks or alters the read), deterministic (a
+`query_facts` lookup filtered to the file — no LLM, no embedding call), and cheap: one
+request against the repo's own dataset, typically ~100 ms warm, bounded by a budget.
+Each file is served **once per session** (per `COGNEE_FILE_CONTEXT_TTL`) — the model
+already has the map after the first read. It stays silent for files outside every
+indexed repo, non-code files, sensitive paths (the capture deny list: `.env`, keys,
+credentials), a server known to be down, or an open circuit breaker; every skip is
+logged as `file_context_skipped` with its reason.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `COGNEE_FILE_CONTEXT` | `true` | `false` turns the hook off. |
+| `COGNEE_FILE_CONTEXT_SCOPES` | `code` | Lanes to run. Add `graph` (`code,graph`) to also inject up to 3 knowledge-graph hits about the file (notes, decisions, prior-session facts) — a HYBRID_COMPLETION search over the session dataset, so it costs a graph round trip on every first read of a file. |
+| `COGNEE_FILE_CONTEXT_BUDGET` | `3.0` | Seconds for the whole hook; a lane that cannot finish inside it is dropped. |
+| `COGNEE_FILE_CONTEXT_TTL` | `1800` | Seconds before the same file is served again in the same session. |
+| `COGNEE_FILE_CONTEXT_MAX_SYMBOLS` | `40` | Cap on listed symbols (the rest is summarised as a count). |
 
 ## Forget (delete) behavior
 

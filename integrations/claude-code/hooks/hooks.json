@@ -29,6 +29,19 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/file-context.py\" || python \"${CLAUDE_PLUGIN_ROOT}/scripts/file-context.py\"",
+            "timeout": 10,
+            "statusMessage": "Cognee: file context..."
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash|Agent|Read|Write|Edit|Grep|Glob",
