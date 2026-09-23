@@ -31,6 +31,19 @@ from cognee_integration_hermes.http_backend import HttpBackend  # noqa: E402
 from test_http_backend import FakeOpener  # noqa: E402
 
 _HAS_COGNEE = importlib.util.find_spec("cognee") is not None
+
+
+def _server_defaults_search_type_to_null() -> bool:
+    """cognee >= 1.6.0 defaults an omitted ``search_type`` to null (auto-routing);
+    1.4 pinned GRAPH_COMPLETION and 1.5.x HYBRID_COMPLETION."""
+    if not _HAS_COGNEE:
+        return False
+    from importlib.metadata import version
+
+    major, minor = (int(part) for part in version("cognee").split(".")[:2])
+    return (major, minor) >= (1, 6)
+
+
 _REASON = "install cognee to check the wire contract against its own parser"
 
 
@@ -88,14 +101,20 @@ class TestRecallBodyMeansWhatWeIntend(unittest.TestCase):
 
     def test_omitting_search_type_is_what_broke_auto_routing(self):
         # Characterizes the old wire format: same request minus the key, parsed
-        # by the same DTO, silently means a *pinned* search type instead of the
-        # query classifier. Which type the DTO defaults to has itself moved
-        # (GRAPH_COMPLETION on 1.4, HYBRID_COMPLETION on 1.5.3); the harm this
-        # test pins is that it is not None — auto-routing and the session fold
-        # are conditional on an explicit null.
+        # by the same DTO. Before 1.6.0 that silently meant a *pinned* search
+        # type instead of the query classifier (GRAPH_COMPLETION on 1.4,
+        # HYBRID_COMPLETION on 1.5.x) — auto-routing and the session fold were
+        # conditional on an explicit null. cognee 1.6.0 moved the DTO default to
+        # null itself, so an omitted key now auto-routes; the plugin still sends
+        # the explicit null (test above) so the meaning does not depend on the
+        # server's version.
         body = _sent_body()
         body.pop("search_type")
-        self.assertIsNotNone(self._parse(body).search_type)
+        parsed = self._parse(body)
+        if _server_defaults_search_type_to_null():
+            self.assertIsNone(parsed.search_type)
+        else:
+            self.assertIsNotNone(parsed.search_type)
 
     def test_auto_route_false_still_pins_graph_completion(self):
         dto = self._parse(_sent_body(auto_route=False))
@@ -118,12 +137,16 @@ class TestRecallBodyMeansWhatWeIntend(unittest.TestCase):
 
     def test_the_old_body_could_not_reach_the_session_cache(self):
         # The regression, end to end: strip search_type and the stated scope —
-        # the 0.2.0 wire format — and no scope can see session memory.
+        # the 0.2.0 wire format — and, before 1.6.0, no scope could see session
+        # memory. On 1.6.0 the server's null default lets the same body fold the
+        # session in again; the plugin's explicit scope (tests above) is what
+        # keeps the request meaning the same on every server.
+        expected = ["session", "graph"] if _server_defaults_search_type_to_null() else ["graph"]
         for scope in ("session", "auto"):
             body = _sent_body(scope=scope)
             body.pop("search_type")
             body.pop("scope")
-            self.assertEqual(self._sources(self._parse(body)), ["graph"])
+            self.assertEqual(self._sources(self._parse(body)), expected)
 
 
 if __name__ == "__main__":
