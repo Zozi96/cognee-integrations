@@ -258,6 +258,15 @@ def do_recall(
     except urllib.error.HTTPError as e:
         # Reachable but rejected/failed. NOT an authoritative empty, and NOT a
         # reason to query a different backend via the CLI — report the error.
+        if e.code == 404:
+            # cognee >= 1.6.0 answers a dataset with no graph yet, or a dataset
+            # name that resolves to nothing, with 404 (DatasetNotFoundError)
+            # instead of an empty list. Nothing can be found there: an
+            # authoritative empty, not a failure, and not a reason to fall back.
+            sys.stderr.write(
+                "[cognee-search] no graph for this dataset yet (HTTP 404) — empty result\n"
+            )
+            return []
         if e.code in (401, 403):
             msg = "unauthorized (HTTP %s) — check COGNEE_API_KEY / credentials" % e.code
         else:

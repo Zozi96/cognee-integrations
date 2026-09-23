@@ -92,6 +92,11 @@ def _coerce_result_dict(value: Any) -> dict[str, Any]:
     return {"text": str(value)}
 
 
+#: Tag of the per-prompt memory block: one graph-scope ``only_context`` recall
+#: rendered verbatim (see ``CogneeMemoryProvider._run_layered_prefetch``).
+_MEMORY_LANE = "cognee_memory"
+
+
 def _result_text(value: Any) -> str:
     data = _coerce_result_dict(value)
     for key in ("answer", "text", "content", "chunk_text", "summary"):
@@ -968,28 +973,32 @@ class CogneeMemoryProvider(MemoryProvider):
         return scope == ["graph"] and getattr(exc, "status", None) == 404
 
     def _run_layered_prefetch(self, query: str, session_id: str, generation: int) -> None:
-        """Fan recall out over the memory layers, all lanes at once.
+        """One memory request per prompt, plus the code lane when it is armed.
 
-        With ``dataset_ids`` + ``search_type`` in a single request the server's
-        ``auto`` scope resolves graph-only, so cached Q&A turns, trace lessons
-        and distilled agent guidance never reached the prompt. One bounded call
-        per scope instead, each rendered as its own labelled block; a failure in
-        one lane never discards the others. The lanes are dispatched
-        concurrently with one shared deadline, so the prefetch costs the slowest
-        lane (graph) rather than the sum — sequentially, every cheap lane was a
-        full round trip on top of the graph search, and the code lane could burn
-        seconds before graph even started.
+        The memory lane is a single graph-scope ``HYBRID_COMPLETION`` recall
+        with ``only_context`` and this conversation's ``session_id``. On cognee
+        >= 1.6.0 that returns one graph item per dataset whose ``text`` is the
+        full LLM input the completion would have received: the session's
+        conversation history, the question with the retrieved context rendered
+        through the retriever's user template, and the session guidance block.
+        The server builds the history and guidance layers from ``session_id``,
+        so it must always travel; without it the item is bare context. Older
+        servers return the bare retrieval context in ``text``, and the LLM is
+        never called on either. The separate ``system_prompt`` field (the
+        retriever's task template) is deliberately not read.
+
+        That one item replaces the earlier per-scope fan-out (session cache,
+        trace lessons, agent guidance as three more requests). The code lane
+        stays separate: it is a deterministic ``code_query`` against a
+        different dataset. Lanes still share one deadline and are dispatched
+        together; a failure in one never discards the other.
         """
         budget = self._config.get("recall_budget")
         deadline = time.monotonic() + (20.0 if budget is None else float(budget))
         recall_timeout = self._timeout("recall_timeout", 120)
         top_k = min(self._top_k, 5)
 
-        lanes: list[tuple[str, dict[str, Any], bool]] = [
-            ("session_memory", {"scope": ["session"]}, False),
-            ("trace_lessons", {"scope": ["trace"]}, False),
-            ("agent_guidance", {"scope": ["session_context"], "context_profile": "agent"}, True),
-        ]
+        lanes: list[tuple[str, dict[str, Any], bool]] = []
         code_lane = self._code_lane(query)
         if code_lane:
             lanes.append(
@@ -1004,10 +1013,10 @@ class CogneeMemoryProvider(MemoryProvider):
                 )
             )
         # HYBRID_COMPLETION combines BM25 + vector + graph retrieval; with
-        # only_context the LLM completion is skipped server-side either way.
-        lanes.append(
-            ("graph_memory", {"scope": ["graph"], "query_type": "HYBRID_COMPLETION"}, True)
-        )
+        # only_context the LLM completion is skipped server-side and the item's
+        # text is the prompt that completion would have read. Not marked as
+        # cross-session: on >= 1.6.0 the item carries this session's history.
+        lanes.append((_MEMORY_LANE, {"scope": ["graph"], "query_type": "HYBRID_COMPLETION"}, False))
 
         # Same deadline for every lane: min(per-call timeout, budget left).
         # Below the floor a call cannot return anything useful, so nothing is
@@ -1064,7 +1073,10 @@ class CogneeMemoryProvider(MemoryProvider):
                 logger.debug("Cognee recall lane %s failed: %s", label, exc)
                 continue
             answered = True
-            lines = self._format_recall_lines(results, limit=top_k)
+            if label == _MEMORY_LANE:
+                lines = self._memory_lane_texts(results)
+            else:
+                lines = self._format_recall_lines(results, limit=top_k)
             if not lines:
                 continue
             hits += len(lines)
@@ -1576,6 +1588,25 @@ class CogneeMemoryProvider(MemoryProvider):
             if data.get(key) is not None:
                 normalized[key] = data[key]
         return normalized
+
+    def _memory_lane_texts(self, results: list[Any]) -> list[str]:
+        """Each graph item's ``text`` verbatim — that string *is* the memory.
+
+        On cognee >= 1.6.0 an ``only_context`` completion item is the whole
+        LLM input: history first, retrieved context in the middle, guidance at
+        the end. Truncating or bulleting it would cut exactly what memory is
+        for, so nothing is parsed, stripped or shortened. ``system_prompt`` is
+        never read. Older servers put the bare context in ``text``, which
+        passes through the same way.
+        """
+        texts = []
+        for item in results:
+            data = _coerce_result_dict(item)
+            text = data.get("text")
+            text = str(text).strip() if text else _result_text(item).strip()
+            if text:
+                texts.append(text)
+        return texts
 
     def _format_recall_lines(self, results: list[Any], *, limit: int) -> list[str]:
         lines = []

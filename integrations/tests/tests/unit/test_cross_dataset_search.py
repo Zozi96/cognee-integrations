@@ -32,7 +32,7 @@ import time
 import urllib.error
 
 import pytest
-from utils.recall import HIT, SCOPES, URL, drive_recall, load_lookup
+from utils.recall import HIT, SCOPES, URL, arm_code_lane, drive_recall, load_lookup
 
 
 @pytest.fixture(autouse=True)
@@ -252,10 +252,12 @@ def test_hits_still_offer_the_other_datasets(lookup, monkeypatch):
     assert "does not answer it, do not conclude that memory has nothing" in ctx
 
 
-def test_an_errored_graph_scope_still_offers_when_others_answered(lookup, monkeypatch):
-    """The server is alive (other scopes answered), so the recommended search
-    would work — the list is offered."""
+def test_an_errored_graph_scope_still_offers_when_the_code_lane_answered(lookup, monkeypatch):
+    """The server is alive (the code lane, the only other request the hook
+    makes, answered), so the recommended search would work — the list is
+    offered."""
     _offer(lookup, monkeypatch)
+    arm_code_lane(monkeypatch)
 
     def recall(_prompt, **kw):
         if kw["scope"] == ["graph"]:
@@ -284,7 +286,8 @@ def test_a_dead_server_offers_nothing(lookup, monkeypatch):
 
 
 def test_a_dataset_without_a_graph_yet_still_offers(lookup, monkeypatch):
-    """404 on the graph scope is "no graph built yet" — an authoritative empty."""
+    """404 on the graph scope is "no graph built yet" — an authoritative empty,
+    from a server that answered; the other datasets are exactly what to offer."""
     _offer(lookup, monkeypatch)
 
     def recall(_prompt, **kw):

@@ -27,6 +27,35 @@ const DEFAULT_INGESTION_TIMEOUT_MS = 300_000;
 // implementation instead of duplicating ~200 lines of fetch/auth logic.
 // ---------------------------------------------------------------------------
 
+/**
+ * Turn a failed /auth/login response into an actionable error message.
+ *
+ * cognee >= 1.6.0 no longer bakes in a default-user password: the server creates
+ * the default user only when DEFAULT_USER_PASSWORD is set at startup, and a
+ * password-less user answers a login with 400 "does not have a password". Bad
+ * credentials come back as 400 LOGIN_BAD_CREDENTIALS. The raw status and body
+ * are always kept in the message.
+ */
+export function loginFailureMessage(status: number, body: string): string {
+  const base = `Cognee login failed (${status}): ${body}`;
+  if (status === 400 && /does not have a password/i.test(body)) {
+    return (
+      `${base} — the Cognee server's default user has no password (cognee >= 1.6.0 creates ` +
+      `none unless DEFAULT_USER_PASSWORD is set when the server starts). Either start the ` +
+      `server with DEFAULT_USER_PASSWORD set to the same value as the plugin's password ` +
+      `setting (config "password" / COGNEE_PASSWORD), or set COGNEE_API_KEY directly.`
+    );
+  }
+  if (status === 400 && /LOGIN_BAD_CREDENTIALS/.test(body)) {
+    return (
+      `${base} — the Cognee server rejected the configured username/password. Check the ` +
+      `plugin's "username" / "password" settings (or COGNEE_USERNAME / COGNEE_PASSWORD), ` +
+      `or set COGNEE_API_KEY to skip the password login.`
+    );
+  }
+  return base;
+}
+
 export class CogneeHttpClient {
   private authToken: string | undefined;
   private loginPromise: Promise<void> | undefined;
@@ -73,7 +102,7 @@ export class CogneeHttpClient {
       });
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`Cognee login failed (${response.status}): ${errorText}`);
+        throw new Error(loginFailureMessage(response.status, errorText));
       }
       const data = (await response.json()) as { access_token?: string; token?: string };
       this.authToken = data.access_token ?? data.token;
@@ -588,6 +617,14 @@ export class CogneeHttpClient {
   // the server returns the retrieved context and SKIPS the LLM completion
   // step, which dominates recall latency in the *_COMPLETION search types.
   // Injected memories should be stored context, not generated answers.
+  //
+  // Since cognee 1.6.0 a completion-type, only_context call with
+  // scope ["graph"] and a session_id returns ONE item per dataset whose
+  // `text` is the full LLM input (conversation history + templated question
+  // and context + session guidance) and a separate `system_prompt` the plugin
+  // ignores. 1.5.x servers put the bare retrieval context in `text`; both
+  // pass through normalizeSearchResults unchanged. The former `context_format`
+  // request field no longer exists and is never sent.
   async recall(params: {
     queryText: string;
     searchPrompt: string;
@@ -854,6 +891,9 @@ function asString(value: unknown): string {
  * session_context has content.
  */
 function recallEntryText(record: Record<string, unknown>, source: string | undefined): string {
+  // Graph items (and the 1.6.0 full-prompt `text`) win outright: `text` is
+  // returned verbatim, never `content`/`search_result`, and `system_prompt`
+  // (the retriever's task template on cognee >= 1.6.0) is never read.
   if (typeof record.text === "string") return record.text;
   if (source === "session" || (typeof record.question === "string" && typeof record.answer === "string")) {
     const q = asString(record.question).trim();

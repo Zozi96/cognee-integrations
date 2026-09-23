@@ -73,13 +73,37 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .backend import MemoryBackend
-from .config import SHARED_PLUGIN_STATE_DIR
+from .config import (  # noqa: F401 — DEFAULT_USER_* re-exported for callers/tests
+    DEFAULT_USER_EMAIL,
+    DEFAULT_USER_PASSWORD,
+    SHARED_PLUGIN_STATE_DIR,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_EMAIL = "default_user@example.com"
-DEFAULT_USER_PASSWORD = "default_password"
 _API_KEY_NAME = "hermes-owner-bootstrap"
+
+# How the server's login route phrases the two rejections a default-user login
+# can get (cognee 1.6.0 ``/api/v1/auth/login``, both HTTP 400). Matched
+# case-insensitively against the response body.
+_LOGIN_NO_PASSWORD_MARKER = "does not have a password"
+_LOGIN_BAD_CREDENTIALS_MARKER = "login_bad_credentials"
+
+_LOGIN_NO_PASSWORD_HINT = (
+    "the cognee server's default user has no password, so the plugin cannot "
+    "log in to mint an API key: cognee >= 1.6.0 creates the default user only "
+    "when the server is started with DEFAULT_USER_PASSWORD set (this plugin "
+    "sets it for the server it spawns, but not for one started elsewhere). "
+    "Start the server with DEFAULT_USER_PASSWORD set to the same value as "
+    "COGNEE_USER_PASSWORD (default: the plugin's built-in default), or set "
+    "COGNEE_API_KEY to a key issued by that server."
+)
+_LOGIN_BAD_CREDENTIALS_HINT = (
+    "the cognee server rejected the default-user login (LOGIN_BAD_CREDENTIALS): "
+    "COGNEE_USER_EMAIL / COGNEE_USER_PASSWORD do not match the server's "
+    "DEFAULT_USER_EMAIL / DEFAULT_USER_PASSWORD. Make them agree, or set "
+    "COGNEE_API_KEY to a key issued by that server."
+)
 
 # Log lines that betray an embedding-context overflow on the server. Grounded in
 # cognee's OllamaEmbeddingEngine: it logs "Ollama embedding error: <msg>" for the
@@ -120,6 +144,16 @@ class CogneeHttpError(RuntimeError):
     def __init__(self, status: int, message: str):
         super().__init__(message)
         self.status = status
+
+
+class CogneeLoginRejected(CogneeHttpError):
+    """The default-user login was reached and refused for a *diagnosed* reason.
+
+    Distinguishes "this server has no login to mint from" (auth disabled, 404 —
+    quietly proceed without a key) from "this server wants a key and the login
+    we would mint it with is misconfigured", which the user has to fix. The
+    message is the actionable hint.
+    """
 
 
 class CogneeUnreachable(RuntimeError):
@@ -214,6 +248,10 @@ class HttpBackend(MemoryBackend):
         # tests; None means "resolve the spawned server's default at connect()".
         self._server_log_path = server_log_path
         self._log_offset: Optional[int] = None
+        # Set when connect() proceeded without a key because the default-user
+        # login was rejected for a known reason; appended to any later 401 so
+        # the failure the user actually sees names the fix.
+        self._auth_hint = ""
 
     # -- transport ---------------------------------------------------------
 
@@ -276,9 +314,10 @@ class HttpBackend(MemoryBackend):
                 detail = exc.read().decode("utf-8")[:300]
             except Exception:
                 pass
-            raise CogneeHttpError(
-                exc.code, f"{method} {path} failed (HTTP {exc.code}): {detail or exc.reason}"
-            ) from exc
+            message = f"{method} {path} failed (HTTP {exc.code}): {detail or exc.reason}"
+            if exc.code == 401 and self._auth_hint:
+                message = f"{message}. No API key was sent because {self._auth_hint}"
+            raise CogneeHttpError(exc.code, message) from exc
         except Exception as exc:  # URLError / timeout / OSError
             raise CogneeUnreachable(f"cognee unreachable at {url}: {str(exc)[:200]}") from exc
 
@@ -515,6 +554,14 @@ class HttpBackend(MemoryBackend):
             )
         try:
             key = self._mint_api_key(timeout=timeout)
+        except CogneeLoginRejected as exc:
+            # The server answered the login and refused it for a reason the user
+            # can act on. Still not fatal here — the server may not require a
+            # key — but say so loudly, and remember the hint for the 401 that
+            # follows if it does.
+            self._auth_hint = str(exc)
+            logger.warning("could not mint a cognee API key (continuing without): %s", exc)
+            return ""
         except Exception as exc:
             # A local server with authentication disabled needs no key at all, so
             # this is not fatal — proceed unauthenticated and let the first real
@@ -530,12 +577,21 @@ class HttpBackend(MemoryBackend):
         email = os.environ.get("COGNEE_USER_EMAIL", DEFAULT_USER_EMAIL)
         password = os.environ.get("COGNEE_USER_PASSWORD", DEFAULT_USER_PASSWORD)
 
-        login = self._request(
-            "POST",
-            "/api/v1/auth/login",
-            timeout=timeout,
-            form_body={"username": email, "password": password},
-        )
+        try:
+            login = self._request(
+                "POST",
+                "/api/v1/auth/login",
+                timeout=timeout,
+                form_body={"username": email, "password": password},
+            )
+        except CogneeHttpError as exc:
+            if exc.status == 400:
+                body = str(exc).lower()
+                if _LOGIN_NO_PASSWORD_MARKER in body:
+                    raise CogneeLoginRejected(400, _LOGIN_NO_PASSWORD_HINT) from exc
+                if _LOGIN_BAD_CREDENTIALS_MARKER in body:
+                    raise CogneeLoginRejected(400, _LOGIN_BAD_CREDENTIALS_HINT) from exc
+            raise
         token = str((login or {}).get("access_token") or "")
         if not token:
             raise CogneeHttpError(200, "login returned no access token")
@@ -604,9 +660,11 @@ class HttpBackend(MemoryBackend):
             # when the scope includes "code" — the server rejects it otherwise.
             body["code_query"] = code_query
         if only_context:
-            # Skip the server-side LLM completion and return raw context. The
-            # layered per-scope recall uses this: it renders results itself, so
-            # paying an LLM call per scope would only add latency.
+            # Skip the server-side LLM completion. For a completion search type
+            # on cognee >= 1.6.0 the graph item's ``text`` is then the full
+            # prompt the completion would have read (history + context +
+            # guidance, built from ``session_id``); older servers return the
+            # bare context. The per-prompt memory lane injects that verbatim.
             body["only_context"] = True
         # Always sent, null included: the endpoint defaults a *missing*
         # search_type to GRAPH_COMPLETION for backward compatibility, and only an

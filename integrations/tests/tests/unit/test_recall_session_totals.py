@@ -15,9 +15,10 @@ Contract:
   * a corrupt or legacy (total-less) per-session file restarts the count rather
     than breaking the write;
   * the per-session copy is only written for a path-safe session key;
-  * ``cross_session_hits`` counts the graph passages not stamped with this
-    session's id — session/trace/guidance hits are this session's by
-    construction and never count.
+  * ``cross_session_hits`` counts the memory items not stamped with this
+    session's id — since cognee 1.6.0 (SDK-741) memory is one graph-scope
+    request, and anything an older server still tags as session / trace /
+    guidance is this session's by construction and never counts.
 
 Both suites keep the total. claude-code writes it to the per-session copy
 ``recall/<session_key>.json`` (what its bar reads); codex has one shared
@@ -170,7 +171,7 @@ def test_path_unsafe_session_key_writes_no_per_session_copy(lookup, monkeypatch,
     assert run.detail("last_recall_write_failed") is None, run.events
     recall_dir = state / "recall"
     assert not recall_dir.exists() or not any(recall_dir.iterdir())
-    assert _shared(state)["hits"]["session"] == 1
+    assert _shared(state)["hits"]["graph_context"] == 1
 
 
 # ── from past sessions ─────────────────────────────────────────────────────
@@ -179,12 +180,8 @@ _SID = "sid"  # what drive_recall's _load_session_id seam returns
 
 
 def _graph(*texts):
-    return {
-        "session": [],
-        "trace": [],
-        "graph": [{"source": "graph", "text": text} for text in texts],
-        "session_context": [],
-    }
+    """1.6.0-shaped memory items: one ``text`` each, on the graph request."""
+    return {"graph": [{"source": "graph", "text": text} for text in texts]}
 
 
 def test_graph_passages_from_other_sessions_count(lookup, monkeypatch, per_session):
@@ -222,19 +219,23 @@ def test_unstamped_graph_passages_count_as_outside_this_session(lookup, monkeypa
     assert per_session()["cross_session_hits"] == 1
 
 
-def test_session_scoped_hits_never_count_as_cross_session(lookup, monkeypatch, per_session):
+def test_legacy_session_tagged_hits_never_count_as_cross_session(lookup, monkeypatch, per_session):
+    """Items a pre-1.6.0 server tags as session / trace / guidance are this
+    session's own, whichever request they arrive on."""
     drive_recall(
         lookup,
         monkeypatch,
         recall={
-            "session": [{"question": "q", "answer": "a"}],
-            "trace": [{"source": "trace", "origin_function": "Bash", "status": "success"}],
-            "graph": [],
-            "session_context": [{"source": "session_context", "content": "guidance"}],
+            "graph": [
+                {"question": "q", "answer": "a"},
+                {"source": "trace", "origin_function": "Bash", "status": "success"},
+                {"source": "session_context", "content": "guidance"},
+            ],
         },
     )
     marker = per_session()
     assert sum(marker["hits"].values()) == 3
+    assert marker["hits"]["graph_context"] == 0
     assert marker["cross_session_hits"] == 0
 
 
@@ -263,15 +264,11 @@ def test_codex_header_reads_in_plain_words(codex, lookup, monkeypatch, state):
     drive_recall(
         lookup,
         monkeypatch,
-        recall={
-            "session": [{"question": "q", "answer": "a"}],
-            "trace": [],
-            "graph": [
-                {"source": "graph", "text": "Session ID: claude_other\n\nx"},
-                {"source": "graph", "text": f"Session ID: {_SID}\n\ny"},
-            ],
-            "session_context": [],
-        },
+        recall=_graph(
+            "Session ID: claude_other\n\nx",
+            f"Session ID: {_SID}\n\ny",
+            f"Session ID: {_SID}\n\nz",
+        ),
     )
     assert _codex_header(state) == (
         "Cognee memory: 3 memory hits (1 from a past session) · 1/1 turns had hits this session"
@@ -289,5 +286,5 @@ def test_codex_header_says_warming_up_until_the_first_hit(codex, lookup, monkeyp
 
 
 def test_codex_header_omits_past_sessions_at_zero(codex, lookup, monkeypatch, state):
-    drive_recall(lookup, monkeypatch, recall=HIT)
+    drive_recall(lookup, monkeypatch, recall=_graph(f"Session ID: {_SID}\n\nQuestion: q"))
     assert _codex_header(state).startswith("Cognee memory: 1 memory hit · 1/1 turns had hits")

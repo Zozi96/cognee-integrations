@@ -10,6 +10,49 @@ The version must match the `version` field in both `pyproject.toml` and
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0]
+
+### Changed
+- **Pinned cognee is 1.6.0** (was 1.5.4) in `pyproject.toml`, both `plugin.yaml`
+  copies and `uv.lock`. The installed package doubles as the local server the plugin
+  spawns, so a `pip install -U` upgrades that server too and its next boot runs the
+  1.6.0 migrations. 1.6.0 made `fastembed` and `onnxruntime` core dependencies, so
+  the install is larger.
+- **One memory request per prompt, injected as the LLM would have received it
+  (SDK-741, cognee #5085).** With `only_context`, a completion search type on cognee
+  1.6.0 returns one item per dataset whose `text` is the full LLM input: the
+  conversation history for the session, the question with the retrieved graph
+  context rendered through the retriever's template, and the session guidance block
+  (a separate `system_prompt` field carries the task template and is ignored). The
+  per-turn prefetch therefore no longer fans out over the `session_memory`,
+  `trace_lessons` and `agent_guidance` lanes: it makes one `scope=["graph"]`,
+  `HYBRID_COMPLETION`, `only_context=True` recall carrying the session id (plus the
+  `code_graph` lane when a prompt arms it) and injects the item's `text` verbatim,
+  uncapped — the former 500-character cut removed exactly the context and guidance
+  the block is for. The block is `<cognee_memory>` (was `<graph_memory>`); the
+  memory lane no longer counts as "beyond this session" in the hit header, since it
+  carries the session's own history. The in-process SDK backend now forwards `scope`
+  and `only_context` to `cognee.recall` so both transports send the same request.
+  Against a pre-1.6.0 server the item holds the bare retrieval context and is
+  injected the same way. The `recall_session_layers=false` legacy path and the
+  explicit `cognee_recall` tool are unchanged.
+
+### Fixed
+- **Fresh installs against cognee 1.6.0 could not mint their owner API key
+  (SDK-740).** cognee 1.6.0 stopped baking `default_password` into the default user:
+  the server creates that user at startup only when `DEFAULT_USER_PASSWORD` is set,
+  sets the password once, and never rewrites a stored one, so the login the key
+  bootstrap relies on answered `400 "This user does not have a password"`. The server
+  this plugin spawns is now started with `DEFAULT_USER_EMAIL=default_user@example.com`
+  and `DEFAULT_USER_PASSWORD=default_password` (the literals every Cognee plugin
+  shares, since they all share one server and one database), `setdefault` so an
+  operator's own `DEFAULT_USER_*` export wins. `COGNEE_USER_EMAIL`/`COGNEE_USER_PASSWORD`
+  still select which user the plugin logs in as; a non-default user must already
+  exist. Against a server the plugin did not start, a rejected login now logs a
+  warning that says what to do (start the server with `DEFAULT_USER_PASSWORD`
+  matching `COGNEE_USER_PASSWORD`, or set `COGNEE_API_KEY`), and the first `401`
+  that follows carries the same hint. The README documents it.
+
 ## [1.2.2]
 
 ### Added

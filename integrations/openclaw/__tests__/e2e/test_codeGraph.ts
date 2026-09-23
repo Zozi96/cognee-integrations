@@ -156,7 +156,7 @@ describe("code recall lane", () => {
     const text = await recallInjection(h, "what calls `UserService` and does it break?");
     const lane = mockRecall.mock.calls.map((c) => c[0]).find((c) => c.scope?.includes("code"))!;
     expect(lane).toMatchObject({ datasetIds: ["id-code"], queryText: "UserService", codeQuery: { operation: "query_facts", name: "UserService", limit: 5 } });
-    expect(text.indexOf("<graph_memory>")).toBeLessThan(text.indexOf("<code_graph>"));
+    expect(text.indexOf("<cognee_memory>")).toBeLessThan(text.indexOf("<code_graph>"));
     expect(text).toContain("UserService.get -> Database.query");
   });
 

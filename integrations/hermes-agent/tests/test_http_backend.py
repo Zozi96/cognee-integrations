@@ -590,6 +590,78 @@ class TestApiKeyResolution(unittest.TestCase):
         backend = self._connect(opener)
         self.assertEqual(backend.api_key, "")
 
+    @staticmethod
+    def _login_400(detail):
+        # cognee 1.6.0's login answers HTTP 400 with a JSON ``detail``; the fake
+        # needs a readable body for _request to pick that detail up.
+        body = io.BytesIO(json.dumps({"detail": detail}).encode("utf-8"))
+        return urllib.error.HTTPError(_URL, 400, "Bad Request", {}, body)
+
+    def test_a_passwordless_default_user_names_the_fix(self):
+        # cognee >= 1.6.0 creates the default user without a password unless the
+        # server was started with DEFAULT_USER_PASSWORD. Connect still succeeds
+        # (the server may not require a key) but the warning must be actionable.
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400(
+            "This user does not have a password. Use API key authentication."
+        )
+        with self.assertLogs("cognee_integration_hermes.http_backend", level="WARNING") as logs:
+            backend = self._connect(opener)
+        self.assertEqual(backend.api_key, "")
+        text = "\n".join(logs.output)
+        self.assertIn("DEFAULT_USER_PASSWORD", text)
+        self.assertIn("COGNEE_USER_PASSWORD", text)
+        self.assertIn("COGNEE_API_KEY", text)
+        self.assertIn("1.6.0", text)
+
+    def test_the_passwordless_hint_reaches_the_first_401(self):
+        # The provider surfaces failures by stringifying the exception, so the
+        # 401 a keyless call gets must carry the hint — that is the user-visible path.
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400(
+            "This user does not have a password. Use API key authentication."
+        )
+        with self.assertLogs("cognee_integration_hermes.http_backend", level="WARNING"):
+            backend = self._connect(opener)
+        opener.responses["/api/v1/recall"] = urllib.error.HTTPError(
+            _URL, 401, "Unauthorized", {}, io.BytesIO(b'{"detail": "Unauthorized"}')
+        )
+        with self.assertRaises(CogneeHttpError) as ctx:
+            backend.recall(
+                query="q",
+                session_id=None,
+                datasets=None,
+                top_k=5,
+                auto_route=True,
+                query_type=None,
+                timeout=_TIMEOUT,
+            )
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertIn("DEFAULT_USER_PASSWORD", str(ctx.exception))
+        self.assertIn("COGNEE_API_KEY", str(ctx.exception))
+
+    def test_bad_credentials_name_the_env_vars(self):
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400("LOGIN_BAD_CREDENTIALS")
+        with self.assertLogs("cognee_integration_hermes.http_backend", level="WARNING") as logs:
+            backend = self._connect(opener)
+        self.assertEqual(backend.api_key, "")
+        text = "\n".join(logs.output)
+        self.assertIn("LOGIN_BAD_CREDENTIALS", text)
+        self.assertIn("COGNEE_USER_EMAIL", text)
+        self.assertIn("COGNEE_USER_PASSWORD", text)
+        self.assertIn("COGNEE_API_KEY", text)
+
+    def test_an_undiagnosed_login_failure_stays_quiet(self):
+        # A 404 (auth disabled) or an unrecognised 400 is the pre-existing
+        # "proceed without a key" case: debug-level only, no warning, no hint.
+        opener = self._mint_opener()
+        opener.responses["/api/v1/auth/login"] = self._login_400("something else")
+        with self.assertNoLogs("cognee_integration_hermes.http_backend", level="WARNING"):
+            backend = self._connect(opener)
+        self.assertEqual(backend.api_key, "")
+        self.assertEqual(backend._auth_hint, "")
+
     def test_a_remote_target_without_a_key_fails_at_connect(self):
         # Cognee Cloud exposes no login route to mint from; continuing without a
         # key would smear one clear startup error into a 401 on every call.

@@ -56,6 +56,10 @@ class IdentityFake:
       - ``seed_owner_key``   -> GET /auth/api-keys returns it, POST mint skipped
       - ``invalidate_key``   -> GET /users/me answers 401 (re-bootstrap path)
       - ``reject_login``     -> POST /auth/login answers 401
+      - ``no_password_user`` -> POST /auth/login answers 400 "does not have a
+                              password" (cognee >= 1.6.0 default user created
+                              without DEFAULT_USER_PASSWORD)
+      - ``wrong_password``   -> POST /auth/login answers 400 LOGIN_BAD_CREDENTIALS
       - ``tenant_id``        -> surfaced in /agents/connections/me
     """
 
@@ -89,6 +93,11 @@ class IdentityFake:
 
         # knobs
         self.reject_login = False
+        # cognee >= 1.6.0: a default user created while DEFAULT_USER_PASSWORD was
+        # unset has no password at all, and login answers 400 with this detail.
+        self.no_password_user = False
+        # A password that does not match the stored one (fastapi-users detail).
+        self.wrong_password = False
         self.tenant_id = "tenant-test"
         # False -> provision answers 404, like a server that predates plugin
         # provisioning; the client must stay on the principal key.
@@ -133,6 +142,12 @@ class IdentityFake:
     def login(self, username: str, password: str) -> tuple[int, dict[str, Any]]:
         if self.reject_login:
             return 401, {"detail": "login rejected"}
+        if self.no_password_user:
+            return 400, {
+                "detail": "This user does not have a password. Use API key authentication."
+            }
+        if self.wrong_password:
+            return 400, {"detail": "LOGIN_BAD_CREDENTIALS"}
         self.seed_user(username, password)
         jwt = make_jwt(self.users[username]["id"])
         self.jwt_to_email[jwt] = username

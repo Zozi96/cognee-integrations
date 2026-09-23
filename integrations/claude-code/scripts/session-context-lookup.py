@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Search session + trace + agent guidance + graph for context relevant to the user's prompt.
 
-Runs on the UserPromptSubmit hook. Calls the server's ``/api/v1/recall``
-once per scope (``session``, ``trace``, ``session_context``, ``graph``), all
-dispatched concurrently, so every layer the SessionManager holds (QA
-entries, agent trace steps, standing agent guidance, and the graph knowledge
-built by ``improve()``) flows back into the agent's context.
+Runs on the UserPromptSubmit hook. One ``/api/v1/recall`` request with
+``scope=["graph"]``, ``HYBRID_COMPLETION`` and ``only_context=True``, carrying the
+session id. On cognee >= 1.6.0 the returned item's ``text`` is the full LLM input
+the completion would have received: the conversation history, the question with
+the retrieved context rendered through the retriever's template, and the session
+guidance block. That one string is injected as-is into the agent's context, so
+the session, trace and agent-guidance layers no longer need requests of their
+own. A deterministic code-graph lane is added only on identifier-shaped prompts.
 
 Configuration:
     Resolves session state via Cognee HTTP endpoints.
@@ -75,7 +78,6 @@ def _audit_clip(value, limit: int) -> str:
 TOP_K = 5
 TRUNCATE_ANSWER = 500
 TRUNCATE_RETURN = 400
-TRUNCATE_GRAPH_CTX = 1500
 # Smallest deadline worth dispatching; with less budget than this, nothing is
 # fired rather than sending every scope a doomed request.
 MIN_SCOPE_TIMEOUT = 0.2
@@ -146,19 +148,24 @@ def _format_entry(entry: dict) -> str:
     source = entry.get("source", "")
 
     if source == "graph_context":
-        # graph_context entries carry `content`; graph_completion results
-        # (folded in from scope=graph) carry `text`. Try both.
-        content = str(entry.get("content", "") or entry.get("text", ""))[:TRUNCATE_GRAPH_CTX]
-        return f"[graph-snapshot]\n{content}"
+        # One item per dataset. On cognee >= 1.6.0 its ``text`` is the full LLM
+        # input the completion would have received (conversation history, the
+        # question with the retrieved context rendered through the retriever's
+        # template, then the session guidance block); older servers put the
+        # bare retrieval context there. Injected whole and uncapped: the context
+        # sits in the middle and the guidance at the end, so any cut would take
+        # exactly what memory is for. ``top_k`` bounds the size server-side.
+        content = str(entry.get("text", "") or entry.get("content", ""))
+        return f"[cognee-memory]\n{content}"
 
     if source == "session_context":
-        content = str(entry.get("content", "") or entry.get("text", ""))[:TRUNCATE_GRAPH_CTX]
+        content = str(entry.get("content", "") or entry.get("text", ""))
         return f"[agent-guidance]\n{content}"
 
     if source == "code":
         # Deterministic code-graph facts (ResponseCodeEntry): `text` is the
         # normalized renderable field; raw payloads keep full structure.
-        content = str(entry.get("text", "") or entry.get("content", ""))[:TRUNCATE_GRAPH_CTX]
+        content = str(entry.get("text", "") or entry.get("content", ""))
         return f"[code-graph]\n{content}"
 
     if source == "trace":
@@ -206,7 +213,7 @@ def _count_cross_session_hits(by_source: dict, session_id: str) -> int:
     for entry in by_source.get("graph_context") or []:
         if not isinstance(entry, dict):
             continue
-        text = str(entry.get("content", "") or entry.get("text", "") or "")
+        text = str(entry.get("text", "") or entry.get("content", "") or "")
         if not session_id or session_id not in text:
             count += 1
     return count
@@ -316,28 +323,22 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     # (store-user-prompt.py) drains instead; improve/SessionEnd re-drain too.
     saves_last_turn = read_and_reset_save_counter(session_id)
 
-    # Run scopes independently AND concurrently. Independently: a failure in
-    # one (e.g. graph search hitting an empty/locked Ladybug DB) must not
-    # discard hits from the others — the server's recall loops over scopes
-    # and fails the whole request on the first failure, so every scope is its
-    # own request. Concurrently: the scopes share nothing (the session layers
-    # read the server's session cache, graph and code hit the graph store),
-    # so all of them are dispatched at once and the prompt waits for the
-    # slowest one instead of the sum. Sequentially, every cheap scope cost a
-    # full round trip on top of the graph search — three of them on a cloud
-    # server — and the code lane, when armed, could burn seconds before graph
-    # even started. Every result still lands in the same injected context.
+    # One request for memory. On cognee >= 1.6.0 an ``only_context`` completion
+    # search returns the whole LLM input: the conversation history (the old
+    # ``session`` scope), the question plus retrieved graph context, and the
+    # session guidance block (the old ``session_context`` scope, distilled from
+    # the trace layer) — so the per-layer fan-out this hook used to run is one
+    # graph-scope recall now, with the session id attached so the server can
+    # build the session layers. Scope, type and only_context stay explicit:
+    # the server's ``auto`` scope would add raw session entries next to the
+    # prompt (or short-circuit the graph on a session hit), and an unpinned
+    # type lets the router pick CHUNKS, which never builds a prompt.
+    # HYBRID_COMPLETION combines BM25 + vector + graph retrieval; the LLM
+    # completion itself is skipped server-side. The code lane below is the
+    # only other request, and only on prompts that arm it. The list order is
+    # the canonical reporting order (per_scope, logs).
     results: list = []
-    # A single graph scope on purpose: the server (cognee >= 1.4) aliases the
-    # old graph_context scope to graph, so a graph_context + graph pair ran
-    # the same full graph retrieval twice per prompt. HYBRID_COMPLETION
-    # combines BM25 + vector + graph retrieval (with only_context=True the LLM
-    # completion is skipped server-side either way). The list order is the
-    # canonical reporting order (per_scope, logs), not a dispatch order.
     scope_specs = [
-        (["session"], None, None),
-        (["trace"], None, None),
-        (["session_context"], None, "agent"),
         (["graph"], "HYBRID_COMPLETION", None),
     ]
     # Additive code-graph lane (cognee >= 1.5.3). Fires only when the prompt
@@ -354,7 +355,7 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     except Exception as exc:
         hook_log("code_lane_gate_error", {"error": str(exc)[:200]})
     if code_lane:
-        scope_specs.insert(3, (["code"], None, None))
+        scope_specs.append((["code"], None, None))
         hook_log(
             "code_lane_armed",
             {
@@ -502,7 +503,12 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
             # every prompt of the first session — expected, not an error:
             # keep it out of recall_error and the health accounting
             # (scopes_answered_err) so real failures stay visible (SDK-469).
+            # It IS an answer, though: the server was reached and said so. Since
+            # memory became one request (SDK-741) nothing else answers on such a
+            # prompt, so this must count as ok or the ready marker, the breaker
+            # and the dataset hint would all read a fresh dataset as an outage.
             hook_log("recall_graph_not_built", {"scope": scope_list, "dataset": scope_dataset})
+            scopes_ok += 1
             continue
         if isinstance(exc, _urlerr.HTTPError):
             scopes_answered_err += 1
@@ -723,8 +729,7 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
     # recalled right now and what the previous turn persisted.
     header = (
         "Cognee memory: recall "
-        f"{counts['session']} session / {counts['trace']} trace / "
-        f"{counts['graph_context']} graph / {counts['session_context']} agent"
+        f"{counts['graph_context']} memory"
         + (f" / {counts['code']} code" if code_lane else "")
         + "; "
         + saves_segment(saves_last_turn)
@@ -735,32 +740,29 @@ async def _run(prompt: str, cwd: str = "") -> dict | None:
         header += f"; {segment}"
 
     section_lines = []
-    if by_source.get("session_context"):
-        section_lines.append("=== Active agent guidance ===")
-        for e in by_source["session_context"]:
-            section_lines.append(_format_entry(e))
-            section_lines.append("")
     if by_source.get("code"):
         section_lines.append("=== Code graph facts ===")
         for e in by_source["code"]:
             section_lines.append(_format_entry(e))
             section_lines.append("")
     if by_source.get("graph_context"):
-        section_lines.append("=== Knowledge graph snapshot ===")
+        section_lines.append("=== Cognee memory ===")
         for e in by_source["graph_context"]:
             section_lines.append(_format_entry(e))
             section_lines.append("")
-    if by_source.get("trace"):
-        section_lines.append("=== Prior agent trace ===")
-        for e in by_source["trace"]:
-            section_lines.append(_format_entry(e))
-            section_lines.append("")
-    if by_source.get("session"):
-        section_lines.append("=== Prior session turns ===")
-        for e in by_source["session"]:
-            section_lines.append(_format_entry(e))
-            section_lines.append("")
-
+    # A server older than 1.6.0 answers the graph scope with the bare context
+    # and nothing else arrives on this request; whatever a server does tag with
+    # another source is still rendered rather than dropped.
+    for src, title in (
+        ("session_context", "=== Active agent guidance ==="),
+        ("trace", "=== Prior agent trace ==="),
+        ("session", "=== Prior session turns ==="),
+    ):
+        if by_source.get(src):
+            section_lines.append(title)
+            for e in by_source[src]:
+                section_lines.append(_format_entry(e))
+                section_lines.append("")
     if total > 0:
         full_context = (
             f"{header}\n\nRelevant context from this session's memory:\n\n"
