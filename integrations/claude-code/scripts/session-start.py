@@ -1975,6 +1975,10 @@ def _with_observer_note(output: dict, observer: dict) -> dict:
     existing = str(hso.get("systemMessage") or "").strip()
     hso["systemMessage"] = f"{existing}\n\n{note}" if existing else note
     result["hookSpecificOutput"] = hso
+    # Claude Code shows only the top-level ``systemMessage`` to the user; the
+    # nested one is kept for readers of hookSpecificOutput (Antigravity adapter).
+    top = str(result.get("systemMessage") or "").strip()
+    result["systemMessage"] = f"{top}\n\n{note}" if top else note
     return result
 
 

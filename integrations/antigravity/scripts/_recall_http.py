@@ -157,6 +157,42 @@ def _error(status, message, *, transient=False):
     return envelope
 
 
+def _searched_target(body):
+    """What a recall body searched, for error messages: dataset name(s) or id(s)."""
+    names = body.get("datasets") or ([body["dataset"]] if body.get("dataset") else [])
+    if names:
+        return "dataset " + ", ".join(str(n) for n in names)
+    ids = body.get("dataset_ids") or []
+    if ids:
+        return "dataset id " + ", ".join(str(i) for i in ids)
+    return ""
+
+
+def _server_error_detail(error, limit=400):
+    """The server's error message from an HTTPError body ('' when there is none)."""
+    try:
+        raw = error.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = raw
+    if isinstance(parsed, dict):
+        for key in ("detail", "message", "error"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                parsed = value
+                break
+            if isinstance(value, dict) and isinstance(value.get("message"), str):
+                parsed = value["message"]
+                break
+    text = parsed if isinstance(parsed, str) else json.dumps(parsed)
+    return " ".join(text.split())[:limit]
+
+
 def coerce_code_query(value):
     """Parse the JSON code_query arg; None on anything empty or malformed.
 
@@ -278,6 +314,15 @@ def do_recall(
             msg = "unauthorized (HTTP %s) — check COGNEE_API_KEY / credentials" % e.code
         else:
             msg = "server returned HTTP %s for /api/v1/recall" % e.code
+            # Name what was searched and pass the server's own reason on: the
+            # server's message identifies a dataset only by UUID, and a bare
+            # status code leaves a model reading this to guess the rest.
+            target = _searched_target(body)
+            if target:
+                msg += " (searched %s)" % target
+            detail = _server_error_detail(e)
+            if detail:
+                msg += ": " + detail
         sys.stderr.write("[cognee-search] %s — NOT falling back to local CLI\n" % msg)
         return _error(e.code, msg)
     except Exception as e:

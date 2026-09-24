@@ -515,6 +515,9 @@ def test_note_warns_about_spend_and_embeddings(session_start, fake_claude, monke
     note = session_start._observer_note(decision)
     assert "Claude subscription" in note and "usage limits" in note
     assert "switch to a new dataset" in note
+    # Claude Code displays only the top-level systemMessage.
+    output = session_start._with_observer_note({"hookSpecificOutput": {}}, decision)
+    assert output["systemMessage"] == note
 
 
 def test_running_keyed_server_is_not_claimed(session_start, fake_claude, monkeypatch):
