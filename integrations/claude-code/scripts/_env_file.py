@@ -71,9 +71,16 @@ _TEMPLATE = """\
 # COGNEE_API_KEY="ck_..."
 
 ## Local mode (default when COGNEE_BASE_URL is unset) — the plugin runs a
-## local Cognee API; only an LLM key is required:
+## local Cognee API. Give it an LLM key of your own:
 # LLM_API_KEY="sk-..."
 # LLM_MODEL="openai/gpt-4o-mini"
+## ...or leave LLM_API_KEY unset: with the `claude` CLI on PATH the Claude Code
+## plugin runs the server's LLM calls on your Claude subscription instead (the
+## "observer"; embeddings then run locally on fastembed). Claude Code only.
+## It spends your Claude usage limits, and a dataset built on fastembed cannot
+## be searched after switching to a key's embedder: switch datasets then.
+# COGNEE_LLM_OBSERVER="auto"     # auto | true | false
+# COGNEE_OBSERVER_MODEL="haiku"  # haiku | sonnet | opus | full model id
 
 ## Local mode backends (optional) — the defaults (sqlite/lancedb/openai) need
 ## nothing here. Configuring a provider below makes session start install the

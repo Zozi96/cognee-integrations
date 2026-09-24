@@ -33,6 +33,7 @@ from _plugin_common import (
     hook_log,
     http_api_ready,
     improve_throttle_reason,
+    is_observer_child,
     load_resolved,
     notify,
     pop_pending_prompt,
@@ -432,6 +433,8 @@ def _maybe_reingest_code_repo(payload: dict) -> None:
 
 
 def main():
+    if is_observer_child():
+        return
     payload_raw = sys.stdin.read()
     if not payload_raw.strip():
         return

@@ -315,6 +315,14 @@ def test_non_read_tool_and_bad_payload_are_ignored(fc, wire, capsys, monkeypatch
     assert wire == []
 
 
+def test_observer_child_exits_before_reading(fc, repo, wire, monkeypatch, capsys):
+    """Inside the observer's own ``claude -p`` child no hook may call the server."""
+    monkeypatch.setenv("COGNEE_OBSERVER_CHILD", "1")
+    _run(fc, monkeypatch, _payload(repo / "pkg" / "mod.py", cwd=repo))
+    assert capsys.readouterr().out == ""
+    assert wire == []
+
+
 def test_file_path_resolves_relative_to_cwd(fc):
     assert fc.file_path_from({"cwd": "/w", "tool_input": {"file_path": "a/b.py"}}) == "/w/a/b.py"
     assert fc.file_path_from({"tool_input": {"file_path": "/abs/x.py"}}) == "/abs/x.py"

@@ -18,10 +18,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _plugin_common import hook_log, quiet_hook_output, refresh_credits
+from _plugin_common import hook_log, is_observer_child, quiet_hook_output, refresh_credits
 
 
 def main():
+    if is_observer_child():
+        return
     sys.stdin.read()  # consume the hook payload as the host requires
     try:
         with quiet_hook_output("credits-refresh"):
