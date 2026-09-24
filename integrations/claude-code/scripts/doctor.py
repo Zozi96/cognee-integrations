@@ -232,6 +232,50 @@ def _resolve_embedding() -> tuple[str, str]:
     return model, dims
 
 
+def _resolve_llm() -> str:
+    """Where the local server's LLM calls go: a configured provider key, or the
+    Claude observer (Claude Code's own subscription via ``claude -p``).
+
+    Local mode only — a remote server owns its own LLM. Read-only: decides as
+    session-start would (``resolve_observer``) and asks the shim's ``/health``;
+    it never starts the shim or touches the environment.
+    """
+    from _observer import observer_alive, resolve_observer
+    from config import load_config
+
+    cfg = load_config()
+    mode = _resolve_mode()
+    if mode == "Cloud":
+        return "Remote server (not applicable)"
+    try:
+        decision = resolve_observer(cfg)
+    except Exception as exc:
+        return f"Unknown ({str(exc)[:80]})"
+    if decision.get("active"):
+        from _observer import SPEND_WARNING, embedding_warning
+
+        shim = "shim running" if observer_alive(decision.get("port")) else "shim not running"
+        return (
+            f"Claude Code observer (`claude -p`, model {decision.get('model')}, "
+            f"{decision.get('endpoint')}, {shim}). {SPEND_WARNING} {embedding_warning()}"
+            + (f" Warning: {decision['model_warning']}" if decision.get("model_warning") else "")
+        )
+    if decision.get("error"):
+        return f"None — {decision['error']}"
+    reason = str(decision.get("reason") or "")
+    if reason in ("llm_key_configured", "llm_provider_configured"):
+        provider = (os.environ.get("LLM_PROVIDER") or "").strip() or "openai (default)"
+        model = (os.environ.get("LLM_MODEL") or "").strip() or "Default"
+        return f"Configured provider ({provider}, model {model})"
+    if reason == "server_dotenv_configured":
+        return f"Configured provider (in the server's {decision.get('dotenv') or '.env'})"
+    if reason == "claude_cli_missing":
+        return "None — no LLM_API_KEY and no `claude` executable for the observer"
+    if reason == "disabled":
+        return "None — no LLM_API_KEY; observer disabled (COGNEE_LLM_OBSERVER=false)"
+    return "None — no LLM_API_KEY configured"
+
+
 def _resolve_env_file() -> str:
     """One-time config file (~/.cognee/.env): presence, key names, overrides.
 
@@ -274,6 +318,7 @@ def collect_report() -> dict:
         "latency_ms": health["latency_ms"],
         "cognee_local": cognee_local,
         "cognee_server": cognee_server,
+        "llm": _resolve_llm(),
         "embedding_model": embedding_model,
         "embedding_dimensions": embedding_dimensions,
         "circuit_breaker": circuit_breaker,
@@ -290,6 +335,7 @@ _DISPLAY_ORDER = [
     ("Latency", "latency_ms"),
     ("Cognee (local)", "cognee_local"),
     ("Cognee (server)", "cognee_server"),
+    ("LLM", "llm"),
     ("Embedding Model", "embedding_model"),
     ("Embedding Dims", "embedding_dimensions"),
     ("Circuit Breaker", "circuit_breaker"),

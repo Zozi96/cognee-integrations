@@ -71,6 +71,31 @@ def test_event_is_wired_to_its_script(suite, manifest, event, script, arg):
         )
 
 
+def test_pretooluse_read_is_wired_to_file_context(suite, manifest):
+    """Claude Code only: file-scoped memory rides on PreToolUse with a ``Read`` matcher.
+
+    The matcher matters as much as the script: without it the hook would run on
+    every tool call (Bash, Edit, ...) and pay a server round trip for nothing.
+    """
+    if suite.name != "claude-code":
+        pytest.skip(f"{suite.name}: PreToolUse file context is a Claude Code feature")
+    groups = manifest.get("PreToolUse", [])
+    wired = [
+        g
+        for g in groups
+        if any("file-context.py" in str(h.get("command", "")) for h in g.get("hooks", []))
+    ]
+    assert wired, f"PreToolUse does not invoke file-context.py: {groups}"
+    assert all(g.get("matcher") == "Read" for g in wired), (
+        f"file-context.py must be scoped to the Read tool: {wired}"
+    )
+    for g in wired:
+        for hook in g.get("hooks", []):
+            if "file-context.py" in str(hook.get("command", "")):
+                assert not hook.get("async"), "file context must be synchronous to inject context"
+                assert 0 < int(hook.get("timeout", 0)) <= 15, "file context must stay cheap"
+
+
 def test_every_python_hook_falls_back_to_python(suite, manifest):
     """Every `python3 x.py` must carry a `|| python x.py` fallback.
 

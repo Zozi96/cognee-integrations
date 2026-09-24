@@ -10,6 +10,65 @@ Code only offers an update when that string changes. Tag releases as
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.1]
+
+### Added
+- **Local mode without an LLM key: the Claude observer.** Local mode used to be a
+  dead end for anyone without a provider key — the server booted, but every
+  cognify/improve call failed. Now, when no `LLM_API_KEY` (and no `LLM_PROVIDER`) is
+  configured and the `claude` CLI is on PATH, session start routes the local server's
+  LLM calls through Claude Code itself: `_observer.py` points cognee's `custom` provider
+  at a loopback OpenAI-compatible shim (`claude-observer.py`, port 8017) and each
+  `/v1/chat/completions` becomes one `claude -p --safe-mode --output-format json` run,
+  with `--json-schema` carrying cognee's structured-output schemas. Embeddings default
+  to a local model (`EMBEDDING_PROVIDER=fastembed`, `BAAI/bge-small-en-v1.5`, installed
+  as a venv extra like any other provider) unless an embedder is already configured.
+  The decision is made and applied *before* the install/boot so the server inherits it;
+  the shim is started detached and retires itself once the cognee server is gone.
+  `--safe-mode` keeps the OAuth login but disables hooks/plugins in the child, and every
+  hook additionally exits at once under `COGNEE_OBSERVER_CHILD`, so the plugin cannot
+  re-enter itself. Surfaced in the SessionStart system message, `doctor.py`'s new `LLM`
+  row, and the status line: the idle watcher's key check asks the shim
+  (`/v1/observer/probe`) instead of litellm, and a login problem renders as
+  `✕ (claude_not_logged_in)` rather than as an incorrect key. Knobs:
+  `COGNEE_LLM_OBSERVER` (`auto`|`true`|`false`), `COGNEE_OBSERVER_MODEL` (`haiku`; a
+  value that cannot be a model name falls back to it with a warning),
+  `COGNEE_OBSERVER_CLAUDE`, `COGNEE_OBSERVER_PORT`, `COGNEE_OBSERVER_CONCURRENCY`,
+  `COGNEE_OBSERVER_TIMEOUT`. Setting `LLM_API_KEY` switches back on the next launch;
+  cloud mode never uses it. Session start and `doctor.py` warn every time it is in use
+  that the calls spend the Claude subscription's usage, and that a dataset is tied to
+  its embedder (switch datasets when switching between the observer and a key). A key
+  or provider in the `.env` the server itself loads keeps `auto` off. The shim requires
+  a bearer token (`~/.cognee-plugin/observer/token`, handed to cognee as its
+  `LLM_API_KEY`, created atomically so concurrent session starts agree on it) and
+  refuses requests with an `Origin` header; its `claude` child drops only the parent
+  session's variables (keeping `CLAUDE_CODE_OAUTH_TOKEN` and
+  Bedrock/Vertex settings) plus `ANTHROPIC_API_KEY`. The server pidfile records whether
+  the server booted on the observer, so a session joining a running server follows the
+  config it actually has.
+- **File-scoped context on `Read` (`PreToolUse`).** A new hook, `file-context.py`,
+  runs before every `Read` of a source file inside an indexed repository and injects
+  what the code graph knows about that file as `additionalContext`: symbols grouped by
+  kind with line numbers, cross-file calls, and imports — a map the model gets before
+  the territory. Deterministic (`query_facts` filtered to the file; no LLM or embedding
+  call), ~100 ms warm against the repo's own dataset, bounded by
+  `COGNEE_FILE_CONTEXT_BUDGET` (3 s), and served once per file per session
+  (`COGNEE_FILE_CONTEXT_TTL`, 30 min). Never blocks or alters the read. Silent for
+  files outside indexed repos, non-code files, sensitive paths (capture deny list), a
+  server known down, or an open breaker. `COGNEE_FILE_CONTEXT_SCOPES=code,graph` adds
+  up to three knowledge-graph hits about the file (opt-in: it costs a graph search).
+  `COGNEE_FILE_CONTEXT=false` turns it off. When the file changed after the repo was
+  last indexed, the map carries a note that line numbers may have shifted.
+
+### Changed
+- `write_llm_state` accepts an optional `reason` the status line renders in place of
+  the default `incorrect_llm_api_key` label.
+- `~/.cognee/.env` template documents `COGNEE_LLM_OBSERVER` / `COGNEE_OBSERVER_MODEL`.
+- New events: `file_context.{injected,skipped,error}`, `observer.{applied,skipped,
+  refused,shim_start_failed,record_failed,error}` (hooks) and
+  `observer.{started,stopped,completion,completion_failed,probe,retire,signal,
+  handler_exception}` (shim, in `~/.cognee-plugin/observer/observer-events.log`).
+
 ## [1.6.0]
 
 ### Changed

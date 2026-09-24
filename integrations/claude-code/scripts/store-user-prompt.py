@@ -26,6 +26,7 @@ from _plugin_common import (
     drain_warmup_entries,
     get_session_key,
     hook_log,
+    is_observer_child,
     load_resolved,
     notify,
     quiet_hook_output,
@@ -198,6 +199,8 @@ async def _store(prompt: str, payload: dict):
 
 
 def main():
+    if is_observer_child():
+        return
     payload_raw = sys.stdin.read()
     if not payload_raw.strip():
         return

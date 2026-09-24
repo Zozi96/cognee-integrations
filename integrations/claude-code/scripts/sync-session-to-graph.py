@@ -27,6 +27,7 @@ from _plugin_common import (
     get_session_key,
     hook_log,
     http_api_ready,
+    is_observer_child,
     load_resolved,
     resolve_session_key_from_payload,
     resolved_http_endpoint_auth,
@@ -395,6 +396,8 @@ async def _sync(
 
 
 def main():
+    if is_observer_child():
+        return
     detached_final = _DETACHED_ARG in sys.argv
     forced_session_end = _SESSION_END_ARG in sys.argv
     payload_raw = "" if detached_final else sys.stdin.read()

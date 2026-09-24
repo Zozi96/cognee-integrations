@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from _plugin_common import (
     get_session_detail_via_http,
     hook_log,
+    is_observer_child,
     load_resolved,
     recall_via_http,
     resolve_runtime_mode,
@@ -242,6 +243,8 @@ async def _run():
 
 
 def main():
+    if is_observer_child():
+        return
     # Read the PreCompact payload to recover the host session id, which lets the
     # session resolver map back to this launch's Cognee session id (the body is
     # otherwise unused — PreCompact is just a trigger).
