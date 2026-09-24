@@ -74,7 +74,8 @@ def fake_claude(tmp_path, monkeypatch):
 def test_auto_activates_when_no_key_and_claude_present(observer, fake_claude):
     decision = observer.resolve_observer({})
     assert decision["active"] is True
-    assert decision["claude"] == fake_claude
+    # Windows: which() spells the extension as PATHEXT does (claude.CMD).
+    assert os.path.normcase(decision["claude"]) == os.path.normcase(fake_claude)
     assert decision["reason"] == ""
     assert decision["error"] == ""
     assert decision["endpoint"].endswith("/v1")
@@ -611,6 +612,47 @@ def test_shim_requires_the_token(live_shim):
     assert _request(base + "/v1/chat/completions", data=b"{}") == 401
     assert _request(base + "/v1/observer/shutdown", data=b"{}") == 401
     assert _request(base + "/health") == 200  # liveness stays open
+
+
+def _raw_post(base, path, body, headers=""):
+    """POST over a bare socket; return the status line's code, or the socket error.
+
+    urllib hides which side dropped the connection; this shows whether the
+    client got the response or a reset (Windows reports an unread request body
+    as WinError 10053/10054 when the server closes without reading it).
+    """
+    import socket
+
+    host, port = base.rsplit("//", 1)[1].split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        sock.sendall(
+            (
+                f"POST {path} HTTP/1.1\r\nHost: {host}\r\n{headers}"
+                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+            ).encode("ascii")
+            + body
+        )
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+    return int(data.split(b" ", 2)[1])
+
+
+@pytest.mark.parametrize(
+    ("path", "headers", "status"),
+    [
+        ("/v1/chat/completions", "", 401),
+        ("/v1/chat/completions", "Origin: https://evil.example\r\n", 403),
+        ("/v1/nope", "AUTH", 404),
+        ("/v1/embeddings", "AUTH", 501),
+    ],
+)
+def test_shim_reads_the_body_before_answering(live_shim, path, headers, status):
+    """Every early answer drains the request body, so the client gets the status."""
+    base, token = live_shim
+    headers = headers.replace("AUTH", f"Authorization: Bearer {token}\r\n")
+    body = b'{"messages": [{"role": "user", "content": "' + b"x" * 200_000 + b'"}]}'
+    assert _raw_post(base, path, body, headers) == status
 
 
 def test_shim_refuses_browser_requests(live_shim):

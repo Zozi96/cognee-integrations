@@ -546,9 +546,15 @@ class State:
             }
 
 
+# How much of a refused (403/401) request body is read and discarded so the
+# client receives the refusal; a larger one only gets the connection closed.
+_REFUSED_BODY_LIMIT = 1 << 20
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "cognee-claude-observer/1"
     state: State  # set on the class by serve()
+    _body: bytes | None = None
 
     def log_message(self, fmt, *args):  # silence the default stderr access log
         return
@@ -568,9 +574,38 @@ class Handler(BaseHTTPRequestHandler):
             {"error": {"message": message, "type": kind, "code": status, "param": None}},
         )
 
+    def _content_length(self) -> int:
+        try:
+            return max(0, int(self.headers.get("Content-Length") or 0))
+        except ValueError:
+            return 0
+
+    def _consume_body(self) -> None:
+        """Read the request body off the socket, once, before any response.
+
+        Answering without reading it leaves bytes in the receive buffer, and on
+        Windows closing such a socket sends a TCP reset: the client gets
+        WinError 10053/10054 instead of the status it was sent (a 401 for a
+        wrong token read as a dropped connection). Refused requests are
+        drained only up to _REFUSED_BODY_LIMIT; past that the connection is
+        closed without reading, which is the correct cost for an oversized
+        unauthenticated body.
+        """
+        if getattr(self, "_body", None) is not None:
+            return
+        length = self._content_length()
+        self._body = self.rfile.read(length) if length else b""
+
+    def _discard_refused_body(self) -> None:
+        length = self._content_length()
+        if length > _REFUSED_BODY_LIMIT:
+            self.close_connection = True
+            return
+        self._consume_body()
+
     def _read_body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length > 0 else b""
+        self._consume_body()
+        raw = self._body
         if not raw:
             return {}
         try:
@@ -594,6 +629,7 @@ class Handler(BaseHTTPRequestHandler):
         """Refuse browser-originated requests outright, and anything but ``/health``
         without the bearer token. Sends the error response when refusing."""
         if self.headers.get("Origin"):
+            self._discard_refused_body()
             self._send_error(403, "cross-origin requests are not accepted", "forbidden")
             return False
         if path == "/health":
@@ -603,6 +639,7 @@ class Handler(BaseHTTPRequestHandler):
         token = self.state.token
         if token and scheme.lower() == "bearer" and hmac.compare_digest(supplied.strip(), token):
             return True
+        self._discard_refused_body()
         self._send_error(401, "missing or invalid observer token", "unauthorized")
         return False
 
@@ -660,6 +697,9 @@ class Handler(BaseHTTPRequestHandler):
         state = self.state
         if not self._authorized(path):
             return
+        # Every route below may answer without parsing the body (shutdown,
+        # 404, 501); read it first so the reply is not lost to a reset.
+        self._consume_body()
         try:
             if path == "/v1/observer/shutdown":
                 self._send_json(200, {"status": "stopping"})
