@@ -258,6 +258,7 @@ def _resolve_llm() -> str:
         return (
             f"Claude Code observer (`claude -p`, model {decision.get('model')}, "
             f"{decision.get('endpoint')}, {shim}). {SPEND_WARNING} {embedding_warning()}"
+            + (f" Warning: {decision['model_warning']}" if decision.get("model_warning") else "")
         )
     if decision.get("error"):
         return f"None — {decision['error']}"

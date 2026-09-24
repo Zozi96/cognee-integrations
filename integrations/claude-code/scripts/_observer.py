@@ -37,10 +37,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -108,8 +110,39 @@ def base_url(port_number: int | None = None) -> str:
     return f"http://127.0.0.1:{port_number or port()}"
 
 
+# What a ``--model`` value can look like: an alias (``haiku``, ``sonnet[1m]``),
+# a full id (``claude-haiku-4-5-20251001``), a Vertex id (``claude-…@2025…``),
+# a Bedrock id or ARN (``us.anthropic.…-v1:0``, ``arn:aws:bedrock:…/…``).
+# Deliberately a shape check, not an allowlist of names: it rejects what cannot
+# be a model — whitespace, a leading ``-`` (read as a flag) or ``.``, quotes,
+# shell metacharacters — without breaking provider ids the CLI accepts.
+_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]{0,199}")
+
+
+def valid_model(name: str) -> bool:
+    return bool(_MODEL_RE.fullmatch(name or ""))
+
+
+def _configured_model() -> str:
+    return os.environ.get("COGNEE_OBSERVER_MODEL", "").strip()
+
+
 def claude_model() -> str:
-    return os.environ.get("COGNEE_OBSERVER_MODEL", "").strip() or DEFAULT_CLAUDE_MODEL
+    """The ``--model`` for ``claude -p``; the default when the setting is unusable."""
+    value = _configured_model()
+    return value if valid_model(value) else DEFAULT_CLAUDE_MODEL
+
+
+def model_warning() -> str:
+    """Why ``COGNEE_OBSERVER_MODEL`` was ignored, or '' when it is usable/unset."""
+    value = _configured_model()
+    if not value or valid_model(value):
+        return ""
+    shown = value if len(value) <= 60 else value[:57] + "..."
+    return (
+        f"COGNEE_OBSERVER_MODEL={shown!r} is not a valid model name (use haiku, sonnet, "
+        f"opus or a full model id); the observer uses {DEFAULT_CLAUDE_MODEL} instead."
+    )
 
 
 def find_claude() -> str:
@@ -143,32 +176,87 @@ def find_claude() -> str:
     return ""
 
 
+# An empty token file is only ever left by an interrupted writer (older builds
+# created the file first and wrote it second). Younger than this, it may still
+# be mid-write; older, it is abandoned and replaced.
+_EMPTY_TOKEN_STALE_SECONDS = 5.0
+
+
+def _read_token() -> str | None:
+    """The stored token ('' for an empty file), or None when there is no file."""
+    try:
+        return TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+
+
+def _publish_token() -> str:
+    """Create the token file atomically and return the token it holds.
+
+    The token is written to a private temp file first and hard-linked into
+    place: ``os.link`` fails when the target exists, so exactly one writer
+    wins, and the file is never visible without its content — a concurrent
+    reader cannot see it empty. A loser returns the winner's token.
+    """
+    fd, tmp = tempfile.mkstemp(prefix=".token-", dir=str(_STATE_DIR))  # 0600
+    try:
+        token = secrets.token_urlsafe(32)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        try:
+            os.link(tmp, TOKEN_FILE)
+            return token
+        except FileExistsError:
+            return _read_token() or ""
+        except OSError:
+            # No hard links on this filesystem: exclusive create, then write.
+            # Not atomic, but the empty-file recovery in observer_token covers it.
+            try:
+                out = os.open(str(TOKEN_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return _read_token() or ""
+            with os.fdopen(out, "w", encoding="utf-8") as fh:
+                fh.write(token)
+            return token
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def observer_token(create: bool = True) -> str:
     """The shim's bearer token ('' when absent and ``create`` is False). Never raises."""
     try:
-        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        token = _read_token()
         if token or not create:
-            return token
-    except FileNotFoundError:
-        if not create:
-            return ""
-    except OSError:
-        return ""
-    try:
+            return token or ""
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(TOKEN_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        # Lost a creation race (or the file was empty): whoever won wrote it.
+        if token is None:
+            return _publish_token()
+        # An empty file: a writer mid-write, or one that died before writing.
+        for _ in range(5):
+            time.sleep(0.1)
+            token = _read_token()
+            if token is None:
+                return _publish_token()
+            if token:
+                return token
         try:
-            return TOKEN_FILE.read_text(encoding="utf-8").strip()
-        except OSError:
+            age = time.time() - TOKEN_FILE.stat().st_mtime
+        except FileNotFoundError:
+            return _publish_token()
+        if age < _EMPTY_TOKEN_STALE_SECONDS:
             return ""
+        # Abandoned. Best effort: two processes recovering the same abandoned
+        # file at the same instant can still end up holding different tokens.
+        try:
+            TOKEN_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return _publish_token()
     except OSError:
         return ""
-    token = secrets.token_urlsafe(32)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(token)
-    return token
 
 
 def _auth_headers() -> dict:
@@ -246,8 +334,10 @@ def resolve_observer(config: dict | None = None) -> dict:
     """Decide whether the observer serves this launch. Never raises.
 
     Returns ``{"active", "setting", "reason", "claude", "port", "endpoint",
-    "model", "error"}``. ``reason`` explains an inactive verdict; ``error`` is
-    set only when ``COGNEE_LLM_OBSERVER=true`` cannot be honoured.
+    "model", "error"}``, plus ``model_warning`` when ``COGNEE_OBSERVER_MODEL`` was
+    unusable and ``model`` fell back to the default. ``reason`` explains an
+    inactive verdict; ``error`` is set only when ``COGNEE_LLM_OBSERVER=true``
+    cannot be honoured.
     """
     config = config or {}
     mode = setting()
@@ -291,6 +381,9 @@ def resolve_observer(config: dict | None = None) -> dict:
                 result["reason"] = "server_dotenv_configured"
                 result["dotenv"] = str(server_dotenv_path() or "")
                 return result
+    warning = model_warning()
+    if warning:
+        result["model_warning"] = warning
     if not result["claude"]:
         result["reason"] = "claude_cli_missing"
         if mode == "true":

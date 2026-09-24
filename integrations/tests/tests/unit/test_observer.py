@@ -141,6 +141,123 @@ def test_token_is_created_once_and_private(observer):
         assert stat.S_IMODE(observer.TOKEN_FILE.stat().st_mode) == 0o600
 
 
+def test_token_loser_of_a_creation_race_gets_the_winners_token(observer, monkeypatch):
+    """os.link is the exclusive step: whoever links second reads the winner's file."""
+    real_link = os.link
+
+    def racing_link(src, dst):
+        observer.TOKEN_FILE.write_text("winner-token", encoding="utf-8")
+        return real_link(src, dst)  # target now exists -> FileExistsError
+
+    monkeypatch.setattr(observer.os, "link", racing_link)
+    assert observer.observer_token() == "winner-token"
+    assert not list(observer._STATE_DIR.glob(".token-*"))  # temp file cleaned up
+
+
+def test_token_is_never_visible_empty(observer, monkeypatch):
+    """The file appears with its content (hard link of a written temp file)."""
+    seen: list[str] = []
+    real_link = os.link
+
+    def watching_link(src, dst):
+        real_link(src, dst)
+        seen.append(observer.TOKEN_FILE.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(observer.os, "link", watching_link)
+    token = observer.observer_token()
+    assert seen == [token] and token
+
+
+def test_empty_token_file_mid_write_is_waited_for(observer, monkeypatch):
+    """An older writer that created the file but has not written it yet."""
+    observer._STATE_DIR.mkdir(parents=True, exist_ok=True)
+    observer.TOKEN_FILE.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        observer.time,
+        "sleep",
+        lambda _s: observer.TOKEN_FILE.write_text("late-token", encoding="utf-8"),
+    )
+    assert observer.observer_token() == "late-token"
+
+
+def test_abandoned_empty_token_file_is_replaced(observer, monkeypatch):
+    """A writer that died between create and write must not break the shim forever."""
+    observer._STATE_DIR.mkdir(parents=True, exist_ok=True)
+    observer.TOKEN_FILE.write_text("", encoding="utf-8")
+    old = observer.TOKEN_FILE.stat().st_mtime - 60
+    os.utime(observer.TOKEN_FILE, (old, old))
+    monkeypatch.setattr(observer.time, "sleep", lambda _s: None)
+    token = observer.observer_token()
+    assert len(token) >= 32
+    assert observer.observer_token(create=False) == token
+
+
+def test_fresh_empty_token_file_is_not_stolen(observer, monkeypatch):
+    """Still empty after the retries but young: its writer may be alive; do not replace."""
+    observer._STATE_DIR.mkdir(parents=True, exist_ok=True)
+    observer.TOKEN_FILE.write_text("", encoding="utf-8")
+    monkeypatch.setattr(observer.time, "sleep", lambda _s: None)
+    assert observer.observer_token() == ""
+    assert observer.TOKEN_FILE.read_text(encoding="utf-8") == ""
+
+
+def test_token_without_hard_links_falls_back_to_exclusive_create(observer, monkeypatch):
+    def no_links(src, dst):
+        raise PermissionError("hard links not supported")
+
+    monkeypatch.setattr(observer.os, "link", no_links)
+    token = observer.observer_token()
+    assert len(token) >= 32
+    assert observer.observer_token(create=False) == token
+    if os.name != "nt":
+        assert stat.S_IMODE(observer.TOKEN_FILE.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "haiku",
+        "sonnet[1m]",
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4@20250514",
+        "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+    ],
+)
+def test_real_model_ids_are_accepted(observer, monkeypatch, value):
+    monkeypatch.setenv("COGNEE_OBSERVER_MODEL", value)
+    assert observer.claude_model() == value
+    assert observer.model_warning() == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "opus --verbose --output-file /tmp/leak",
+        "--dangerously-skip-permissions",
+        "../../../etc/passwd",
+        "'; drop table users--",
+        "haiku\nsonnet",
+        "x" * 201,
+    ],
+)
+def test_unusable_model_falls_back_with_a_clear_warning(observer, fake_claude, monkeypatch, value):
+    monkeypatch.setenv("COGNEE_OBSERVER_MODEL", value)
+    assert observer.claude_model() == observer.DEFAULT_CLAUDE_MODEL
+    warning = observer.model_warning()
+    assert "COGNEE_OBSERVER_MODEL" in warning and "not a valid model name" in warning
+    assert f"uses {observer.DEFAULT_CLAUDE_MODEL} instead" in warning
+    decision = observer.resolve_observer({})
+    # The observer still runs — on the default model — and says why.
+    assert decision["active"] is True
+    assert decision["model"] == observer.DEFAULT_CLAUDE_MODEL
+    assert decision["model_warning"] == warning
+
+
+def test_unset_model_has_no_warning(observer, fake_claude):
+    assert "model_warning" not in observer.resolve_observer({})
+
+
 def test_disabled_is_final(observer, fake_claude, monkeypatch):
     monkeypatch.setenv("COGNEE_LLM_OBSERVER", "false")
     decision = observer.resolve_observer({})
@@ -289,6 +406,9 @@ def test_model_alias_resolves_to_configured_claude_model(shim, observer, monkeyp
     assert shim.resolve_model(observer.MODEL_ALIAS) == "sonnet"
     assert shim.resolve_model("openai/opus") == "opus"
     assert shim.resolve_model("") == "sonnet"
+    # A request naming something that cannot be a model gets the configured one.
+    assert shim.resolve_model("--dangerously-skip-permissions") == "sonnet"
+    assert shim.resolve_model("opus --verbose") == "sonnet"
 
 
 @pytest.mark.parametrize(
@@ -542,6 +662,15 @@ def test_note_warns_about_spend_and_embeddings(session_start, fake_claude, monke
     # Claude Code displays only the top-level systemMessage.
     output = session_start._with_observer_note({"hookSpecificOutput": {}}, decision)
     assert output["systemMessage"] == note
+
+
+def test_note_carries_the_model_warning(session_start, fake_claude, monkeypatch):
+    monkeypatch.setenv("COGNEE_OBSERVER_MODEL", "opus --verbose")
+    decision = _decide(session_start, monkeypatch, running=False, stamp=None)
+    assert decision["active"] is True and decision["model"] == "haiku"
+    note = session_start._observer_note(decision)
+    assert "model haiku" in note
+    assert "Warning: COGNEE_OBSERVER_MODEL='opus --verbose' is not a valid model name" in note
 
 
 def test_running_keyed_server_is_not_claimed(session_start, fake_claude, monkeypatch):

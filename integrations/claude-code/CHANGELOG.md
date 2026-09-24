@@ -31,7 +31,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   row, and the status line: the idle watcher's key check asks the shim
   (`/v1/observer/probe`) instead of litellm, and a login problem renders as
   `✕ (claude_not_logged_in)` rather than as an incorrect key. Knobs:
-  `COGNEE_LLM_OBSERVER` (`auto`|`true`|`false`), `COGNEE_OBSERVER_MODEL` (`haiku`),
+  `COGNEE_LLM_OBSERVER` (`auto`|`true`|`false`), `COGNEE_OBSERVER_MODEL` (`haiku`; a
+  value that cannot be a model name falls back to it with a warning),
   `COGNEE_OBSERVER_CLAUDE`, `COGNEE_OBSERVER_PORT`, `COGNEE_OBSERVER_CONCURRENCY`,
   `COGNEE_OBSERVER_TIMEOUT`. Setting `LLM_API_KEY` switches back on the next launch;
   cloud mode never uses it. Session start and `doctor.py` warn every time it is in use
@@ -39,8 +40,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   its embedder (switch datasets when switching between the observer and a key). A key
   or provider in the `.env` the server itself loads keeps `auto` off. The shim requires
   a bearer token (`~/.cognee-plugin/observer/token`, handed to cognee as its
-  `LLM_API_KEY`) and refuses requests with an `Origin` header; its `claude` child drops
-  only the parent session's variables (keeping `CLAUDE_CODE_OAUTH_TOKEN` and
+  `LLM_API_KEY`, created atomically so concurrent session starts agree on it) and
+  refuses requests with an `Origin` header; its `claude` child drops only the parent
+  session's variables (keeping `CLAUDE_CODE_OAUTH_TOKEN` and
   Bedrock/Vertex settings) plus `ANTHROPIC_API_KEY`. The server pidfile records whether
   the server booted on the observer, so a session joining a running server follows the
   config it actually has.

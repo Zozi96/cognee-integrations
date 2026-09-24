@@ -199,7 +199,9 @@ def resolve_model(requested: str) -> str:
     name = str(requested or "").strip()
     if "/" in name:
         name = name.rsplit("/", 1)[-1]
-    if not name or name == _observer.MODEL_ALIAS:
+    # A name that cannot be a model (see _observer._MODEL_RE) never reaches
+    # `claude --model`; it gets the configured model instead.
+    if not name or name == _observer.MODEL_ALIAS or not _observer.valid_model(name):
         return _observer.claude_model()
     return name
 

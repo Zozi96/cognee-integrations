@@ -1870,6 +1870,7 @@ def _apply_observer(config: dict, target_url: str) -> dict:
             {
                 "claude": decision.get("claude", ""),
                 "model": decision.get("model", ""),
+                "model_warning": decision.get("model_warning", ""),
                 "endpoint": decision.get("endpoint", ""),
                 "embedding": os.environ.get("EMBEDDING_PROVIDER", ""),
                 "applied": sorted(applied),
@@ -1933,6 +1934,8 @@ def _observer_note(observer: dict) -> str:
             f"⚠ LLM: Claude Code (observer), model {observer.get('model')}. {SPEND_WARNING}",
             embedding_warning(),
         ]
+        if observer.get("model_warning"):
+            lines.append(f"Warning: {observer['model_warning']}")
         if server_running and server_observer is True and not wanted:
             lines.append(
                 "The running Cognee server was started on the observer, so it still uses "
