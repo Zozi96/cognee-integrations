@@ -324,8 +324,12 @@ def test_observer_child_exits_before_reading(fc, repo, wire, monkeypatch, capsys
 
 
 def test_file_path_resolves_relative_to_cwd(fc):
-    assert fc.file_path_from({"cwd": "/w", "tool_input": {"file_path": "a/b.py"}}) == "/w/a/b.py"
-    assert fc.file_path_from({"tool_input": {"file_path": "/abs/x.py"}}) == "/abs/x.py"
+    # normpath uses the platform separator (\\w\\a\\b.py on Windows).
+    norm = fc.os.path.normpath
+    assert fc.file_path_from({"cwd": "/w", "tool_input": {"file_path": "a/b.py"}}) == norm(
+        "/w/a/b.py"
+    )
+    assert fc.file_path_from({"tool_input": {"file_path": "/abs/x.py"}}) == norm("/abs/x.py")
     assert fc.file_path_from({"tool_input": {}}) == ""
     assert fc.file_path_from({"tool_input": "nope"}) == ""
 

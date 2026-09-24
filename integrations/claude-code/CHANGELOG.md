@@ -55,20 +55,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   files outside indexed repos, non-code files, sensitive paths (capture deny list), a
   server known down, or an open breaker. `COGNEE_FILE_CONTEXT_SCOPES=code,graph` adds
   up to three knowledge-graph hits about the file (opt-in: it costs a graph search).
-  `COGNEE_FILE_CONTEXT=false` turns it off.
-
-- **File-scoped context on `Read` (`PreToolUse`).** A new hook, `file-context.py`,
-  runs before every `Read` of a source file inside an indexed repository and injects
-  what the code graph knows about that file as `additionalContext`: symbols grouped by
-  kind with line numbers, cross-file calls, and imports — a map the model gets before
-  the territory. Deterministic (`query_facts` filtered to the file; no LLM or embedding
-  call), ~100 ms warm against the repo's own dataset, bounded by
-  `COGNEE_FILE_CONTEXT_BUDGET` (3 s), and served once per file per session
-  (`COGNEE_FILE_CONTEXT_TTL`, 30 min). Never blocks or alters the read. Silent for
-  files outside indexed repos, non-code files, sensitive paths (capture deny list), a
-  server known down, or an open breaker. `COGNEE_FILE_CONTEXT_SCOPES=code,graph` adds
-  up to three knowledge-graph hits about the file (opt-in: it costs a graph search).
-  `COGNEE_FILE_CONTEXT=false` turns it off.
+  `COGNEE_FILE_CONTEXT=false` turns it off. When the file changed after the repo was
+  last indexed, the map carries a note that line numbers may have shifted.
 
 ### Changed
 - `write_llm_state` accepts an optional `reason` the status line renders in place of
@@ -78,8 +66,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   refused,shim_start_failed,record_failed,error}` (hooks) and
   `observer.{started,stopped,completion,completion_failed,probe,retire,signal,
   handler_exception}` (shim, in `~/.cognee-plugin/observer/observer-events.log`).
-
-- New events: `file_context.{injected,skipped,error}`.
 
 ## [1.6.0]
 

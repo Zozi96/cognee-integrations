@@ -29,6 +29,25 @@ def observer(suite, isolated_modules, monkeypatch):
     module = isolated_modules(suite, "_observer")
     # The isolation env turns the observer off for every other test.
     monkeypatch.delenv("COGNEE_LLM_OBSERVER", raising=False)
+    # apply_observer_env writes these straight into os.environ. Registering
+    # them with monkeypatch restores them at teardown; without it a leaked
+    # EMBEDDING_PROVIDER=fastembed adds the fastembed extra to every later
+    # install-spec test. Clearing them also keeps a developer's own
+    # LLM_API_KEY from turning the "no key" tests into "key" tests.
+    # setenv first: delenv on an unset key records nothing, so a value the
+    # test sets afterwards would survive teardown.
+    for key in (
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_ENDPOINT",
+        "LLM_API_KEY",
+        "EMBEDDING_PROVIDER",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        module.ACTIVE_ENV_FLAG,
+    ):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     return module
 
 
@@ -37,9 +56,14 @@ def fake_claude(tmp_path, monkeypatch):
     """A `claude` on PATH (so ``find_claude`` resolves) that is never executed."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    exe = bin_dir / "claude"
-    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    # shutil.which only matches PATHEXT extensions on Windows.
+    if os.name == "nt":
+        exe = bin_dir / "claude.cmd"
+        exe.write_text("@exit /b 0\r\n", encoding="utf-8")
+    else:
+        exe = bin_dir / "claude"
+        exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(bin_dir))
     return str(exe)
 
