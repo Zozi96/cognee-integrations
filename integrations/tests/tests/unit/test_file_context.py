@@ -16,6 +16,7 @@ indexed-repo lookup is faked at ``_code_graph.find_indexed_repo``.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -192,6 +193,67 @@ def test_same_file_is_served_once_per_ttl(fc, repo, wire, capsys, monkeypatch):
     _run(fc, monkeypatch, payload)
     assert capsys.readouterr().out == ""
     assert len(wire) == 1
+
+
+def test_failed_lookup_does_not_mark_file_seen(fc, repo, wire, capsys, monkeypatch):
+    """A timeout/error is not an answer: the next Read of the file tries again."""
+    real = fc.recall_via_http
+    attempts: list[int] = []
+
+    def flaky(query, **kw):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise TimeoutError("read deadline exhausted")
+        return real(query, **kw)
+
+    monkeypatch.setattr(fc, "recall_via_http", flaky)
+    payload = _payload(repo / "pkg" / "mod.py", cwd=repo)
+    _run(fc, monkeypatch, payload)
+    assert capsys.readouterr().out == ""
+    _run(fc, monkeypatch, payload)
+    assert (
+        "Widget:10"
+        in json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    )
+    assert len(attempts) == 2
+
+
+def test_empty_answer_still_marks_file_seen(fc, repo, wire, capsys, monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(fc, "recall_via_http", lambda q, **kw: calls.append(1) or [])
+    payload = _payload(repo / "pkg" / "mod.py", cwd=repo)
+    _run(fc, monkeypatch, payload)
+    _run(fc, monkeypatch, payload)
+    assert capsys.readouterr().out == ""
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("offset", "stale"),
+    [(-100.0, True), (+100.0, False), (None, False)],
+    ids=["edited-after-index", "indexed-after-edit", "no-index-stamp"],
+)
+def test_edit_after_index_flags_line_numbers(fc, repo, wire, capsys, monkeypatch, offset, stale):
+    """mtime past ``last_index_at`` adds a shifted-lines note; unknown adds nothing."""
+    target = repo / "pkg" / "mod.py"
+    mtime = target.stat().st_mtime
+    state = {"repo_root": str(repo), "dataset": "codebase-repo-1234"}
+    if offset is not None:
+        state["last_index_at"] = mtime + offset
+    monkeypatch.setattr(sys.modules["_code_graph"], "find_indexed_repo", lambda cwd: state)
+    _run(fc, monkeypatch, _payload(target, cwd=repo))
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "Widget:10" in ctx  # the map is still served either way
+    assert ("line numbers may have shifted" in ctx) is stale
+
+
+def test_edited_since_index_tolerates_bad_inputs(fc, tmp_path):
+    f = tmp_path / "a.py"
+    f.write_text("", encoding="utf-8")
+    assert not fc.edited_since_index(str(f), None)
+    assert not fc.edited_since_index(str(f), "garbage")
+    assert not fc.edited_since_index(str(tmp_path / "missing.py"), 1.0)
+    assert fc.edited_since_index(str(f), 1.0)
 
 
 def test_seen_marker_expires(fc, monkeypatch):
