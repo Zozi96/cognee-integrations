@@ -122,16 +122,16 @@ def _infer_status(payload: dict) -> tuple[str, str]:
     return "success", ""
 
 
-def _load_session(config: dict, *, use_http: bool) -> tuple[str, str, str]:
-    """Load session metadata without network I/O in latency-sensitive HTTP hooks."""
-    if use_http:
-        return get_session_id(config), get_dataset(config), ""
-
-    resolved = load_resolved()
+def _load_session() -> tuple[str, str, str]:
+    """Load session_id, dataset, user_id from resolved cache with fallbacks."""
+    # Local fields only: the identity probes cost up to 10s each on a slow
+    # backend, on every tool call and Stop, and no store path uses user_id.
+    resolved = load_resolved(identity=False)
     session_id = resolved.get("session_id", "")
     dataset = resolved.get("dataset", "")
     user_id = resolved.get("user_id", "")
     if not session_id or not dataset:
+        config = load_config()
         session_id = session_id or get_session_id(config)
         dataset = dataset or get_dataset(config)
     return session_id, dataset, user_id
