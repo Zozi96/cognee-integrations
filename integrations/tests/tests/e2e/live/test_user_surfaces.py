@@ -8,8 +8,10 @@ ever sees it through a surface:
   keeps a long session coherent;
 * **cognee-search.sh**, the escape hatch for asking the graph directly.
 
-All three read the *session cache*, so none of them needs a cognify — which makes
-this the cheapest file in the tier and the one worth running most often.
+The anchor falls back to the session detail endpoint when memory has nothing
+yet, so it needs no cognify. The status line and the search CLI do: recall reads
+the graph only (the session cache is written, never searched), so a fresh
+dataset recalls nothing until one sync has built its graph (``synced_turn``).
 """
 
 from __future__ import annotations
@@ -39,7 +41,10 @@ def _enable_plugin(suite, live_home) -> None:
 
 @pytest.fixture
 def captured_session(started_session, nonce):
-    """A session with one real turn already captured into the session cache."""
+    """A session with one real turn already captured into the session cache.
+
+    Captured, not cognified: tests that need recall to find it add ``synced_turn``.
+    """
     session = started_session("surfaces")
     session.prompt(f"Remember that {nonce} runs on cluster edge-7.", turn_id="t1")
     session.answer(f"Noted: {nonce} runs on cluster edge-7.", turn_id="t1")
@@ -47,13 +52,21 @@ def captured_session(started_session, nonce):
 
 
 @pytest.fixture
-def recalled_session(captured_session, live_suite, live_home, nonce):
+def recalled_session(synced_turn, captured_session, live_suite, live_home, nonce):
     """A session that has just performed a recall which genuinely found something.
 
     Both status-line tests need this precondition, and it is worth asserting
     separately: if the recall found nothing, a bar with no counts would be correct
-    and the test would be measuring the wrong thing.
+    and the test would be measuring the wrong thing. The dataset gets a graph
+    first, since without one the graph-only recall has nothing to find.
     """
+    synced_turn(
+        "surfaces-seed",
+        f"Project {nonce}-seed replicates with raft.",
+        f"Noted: {nonce}-seed replicates with raft.",
+        f"How does {nonce}-seed replicate?",
+        "raft",
+    )
     _enable_plugin(live_suite, live_home)
 
     lookup = captured_session.recall(f"Where does {nonce} run?", turn_id="t2")
@@ -158,16 +171,25 @@ def test_precompact_produces_an_anchor_carrying_the_session(
     )
 
 
-def test_search_cli_finds_the_session_from_the_command_line(captured_session, nonce):
-    """cognee-search.sh is the documented way to ask memory directly."""
-    run = captured_session.run_shell(
-        "cognee-search.sh", f"What runs on cluster edge-7 for {nonce}?", "5", "--graph"
+def test_search_cli_finds_the_session_from_the_command_line(synced_turn, captured_session, nonce):
+    """cognee-search.sh is the documented way to ask memory directly.
+
+    It searches the graph, so the fact is synced there first. The query leaves
+    out the asserted term: an only_context recall can echo the question back.
+    """
+    synced_turn(
+        "search-writer",
+        f"Remember that {nonce} runs on cluster edge-7.",
+        f"Noted: {nonce} runs on cluster edge-7.",
+        f"Where does {nonce} run?",
+        "edge-7",
     )
+    run = captured_session.run_shell("cognee-search.sh", f"Where does {nonce} run?", "5", "--graph")
     assert run.ok, f"cognee-search.sh failed (rc={run.returncode}): {run.stderr[:600]}"
 
     output = run.stdout
     assert output.strip(), f"search returned nothing at all; stderr was {run.stderr[:400]}"
-    assert nonce.lower() in output.lower(), (
+    assert "edge-7" in output.lower(), (
         f"the search CLI could not find the session's own content:\n{output[:1200]}"
     )
 

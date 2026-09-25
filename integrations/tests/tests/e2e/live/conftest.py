@@ -373,6 +373,52 @@ def graph(live_base_url: str, live_dataset: str, live_home: Path) -> GraphClient
 
 
 @pytest.fixture
+def synced_turn(started_session, graph: GraphClient):
+    """Write one turn into the graph, then keep the server up for the test.
+
+    Prompt recall reads the graph only: the session cache is written, never
+    searched. On cognee >= 1.6.0 the graph item's text also carries the
+    session's own history, but only once the dataset has a graph — before the
+    first cognify the graph scope answers 404 and nothing is injected. Any
+    test that expects a recall to find something therefore pays for one real
+    sync first; this does it and waits on recall, the only honest readiness
+    gate (``wait_for_sync`` returns on any earlier ``sync_bridge_done`` too).
+
+    ``terms`` must not appear in ``query``: an ``only_context`` recall echoes
+    the question back, so a term taken from it would match trivially.
+
+    An anchor session is held open for the whole test: the plugin runs uvicorn
+    in agent mode, so ending the writer would otherwise leave no agent holding
+    the server and every later request would get ECONNREFUSED.
+    """
+    anchors: list[LiveSession] = []
+
+    def _sync(
+        name: str,
+        prompt: str,
+        answer: str,
+        query: str,
+        *terms: str,
+        tool: tuple | None = None,
+    ) -> str:
+        if not anchors:
+            anchors.append(started_session(f"{name}-anchor"))
+        writer = started_session(name)
+        writer.prompt(prompt, turn_id="t1")
+        if tool is not None:
+            writer.tool(*tool, turn_id="t1")
+        writer.answer(answer, turn_id="t1")
+        end = writer.end()
+        assert end.ok, f"SessionEnd failed (rc={end.returncode}): {end.stderr[:800]}"
+        return graph.wait_until_recalled(query, *terms, deadline=600.0)
+
+    yield _sync
+
+    for anchor in anchors:
+        anchor.end()
+
+
+@pytest.fixture
 def session_for(
     live_prereqs: str,
     live_home: Path,
